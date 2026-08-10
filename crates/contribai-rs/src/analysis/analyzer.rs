@@ -462,7 +462,7 @@ mod tests {
 
     #[test]
     fn test_select_files() {
-        let tree = vec![
+        let tree = [
             "src/main.py".to_string(),
             "src/utils.js".to_string(),
             "README.md".to_string(),

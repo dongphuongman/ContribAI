@@ -10,7 +10,8 @@
 
 use contribai::analysis::ast_intel::AstIntel;
 use contribai::generator::risk::classify_risk;
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
+use std::hint::black_box;
 
 // ── AST Symbol Extraction Benchmarks ────────────────────────────────────────
 

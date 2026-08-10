@@ -1,38 +1,18 @@
-name: 🔒 Security Report
-description: Report a security vulnerability (please use responsibly)
+name: Security guidance
+description: Do not disclose vulnerabilities in a public issue
 labels: ["type/security"]
 body:
   - type: markdown
     attributes:
       value: |
-        ⚠️ **For critical vulnerabilities**, please email security@contribai.dev instead of filing a public issue.
+        Do **not** publish vulnerability details here.
 
-  - type: textarea
-    id: description
-    attributes:
-      label: Vulnerability Description
-      description: Describe the security issue
-    validations:
-      required: true
+        Please use [GitHub private vulnerability reporting](../../security/advisories/new). Include the affected version, impact, prerequisites, and minimal reproduction steps. See [SECURITY.md](../../SECURITY.md) for the full policy.
 
-  - type: dropdown
-    id: severity
+  - type: checkboxes
+    id: confirmation
     attributes:
-      label: Estimated Severity
+      label: Confirmation
       options:
-        - Critical
-        - High
-        - Medium
-        - Low
-
-  - type: textarea
-    id: impact
-    attributes:
-      label: Potential Impact
-      description: What could an attacker achieve?
-
-  - type: textarea
-    id: reproduction
-    attributes:
-      label: Steps to Reproduce
-      description: How can this be reproduced?
+        - label: I will use private vulnerability reporting instead of this public form.
+          required: true

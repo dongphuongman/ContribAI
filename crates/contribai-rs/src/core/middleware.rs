@@ -313,8 +313,10 @@ mod tests {
     #[tokio::test]
     async fn test_rate_limit_blocks() {
         let chain = MiddlewareChain::new(vec![Arc::new(RateLimitMiddleware::new(10))]);
-        let mut ctx = PipelineContext::default();
-        ctx.remaining_prs = 0;
+        let ctx = PipelineContext {
+            remaining_prs: 0,
+            ..PipelineContext::default()
+        };
         let result = chain.execute(ctx).await.unwrap();
         assert!(result.should_skip);
         assert!(result.rate_limited);
@@ -323,9 +325,11 @@ mod tests {
     #[tokio::test]
     async fn test_rate_limit_allows_dry_run() {
         let chain = MiddlewareChain::new(vec![Arc::new(RateLimitMiddleware::new(10))]);
-        let mut ctx = PipelineContext::default();
-        ctx.remaining_prs = 0;
-        ctx.dry_run = true;
+        let ctx = PipelineContext {
+            remaining_prs: 0,
+            dry_run: true,
+            ..PipelineContext::default()
+        };
         let result = chain.execute(ctx).await.unwrap();
         assert!(!result.should_skip);
     }
@@ -342,8 +346,10 @@ mod tests {
     #[tokio::test]
     async fn test_validation_passes() {
         let chain = MiddlewareChain::new(vec![Arc::new(ValidationMiddleware)]);
-        let mut ctx = PipelineContext::default();
-        ctx.repo_name = "test/repo".into();
+        let ctx = PipelineContext {
+            repo_name: "test/repo".into(),
+            ..PipelineContext::default()
+        };
         let result = chain.execute(ctx).await.unwrap();
         assert!(!result.should_skip);
     }
@@ -379,8 +385,10 @@ mod tests {
     #[tokio::test]
     async fn test_quality_gate_blocks() {
         let chain = MiddlewareChain::new(vec![Arc::new(QualityGateMiddleware::new(5.0))]);
-        let mut ctx = PipelineContext::default();
-        ctx.quality_score = 3.0;
+        let ctx = PipelineContext {
+            quality_score: 3.0,
+            ..PipelineContext::default()
+        };
         let result = chain.execute(ctx).await.unwrap();
         assert!(!result.quality_passed);
     }
@@ -388,8 +396,10 @@ mod tests {
     #[tokio::test]
     async fn test_quality_gate_passes() {
         let chain = MiddlewareChain::new(vec![Arc::new(QualityGateMiddleware::new(5.0))]);
-        let mut ctx = PipelineContext::default();
-        ctx.quality_score = 8.0;
+        let ctx = PipelineContext {
+            quality_score: 8.0,
+            ..PipelineContext::default()
+        };
         let result = chain.execute(ctx).await.unwrap();
         assert!(result.quality_passed);
     }
@@ -397,8 +407,10 @@ mod tests {
     #[tokio::test]
     async fn test_default_chain() {
         let chain = build_default_chain(10, 2, 5.0);
-        let mut ctx = PipelineContext::default();
-        ctx.repo_name = "test/repo".into();
+        let ctx = PipelineContext {
+            repo_name: "test/repo".into(),
+            ..PipelineContext::default()
+        };
         let result = chain.execute(ctx).await.unwrap();
         assert!(!result.should_skip);
     }

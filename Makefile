@@ -28,22 +28,22 @@ dev-deps: ## Install development dependencies
 
 build: ## Build release binary
 	@echo "🔨 Building release..."
-	cargo build --release
+	cargo build --release --locked
 	@echo "✅ Binary: target/release/contribai"
 
 install: ## Install to PATH
 	@echo "📦 Installing to ~/.cargo/bin..."
-	cargo install --path crates/contribai-rs
+	cargo install --path crates/contribai-rs --locked
 	@echo "✅ Installed: contribai"
 
 # ── Testing ──────────────────────────────────────────────────────────────────
 
 test: ## Run all tests
-	@echo "🧪 Running 600+ tests..."
-	cargo test
+	@echo "Running workspace tests..."
+	cargo test --workspace --locked
 
 test-quick: ## Run tests without output
-	cargo test --quiet
+	cargo test --workspace --locked --quiet
 
 test-watch: ## Watch and re-run tests on change (requires cargo-watch)
 	cargo watch -x test
@@ -59,7 +59,7 @@ fmt-check: ## Check formatting
 	cargo fmt --all -- --check
 
 clippy: ## Run clippy linter (zero warnings allowed)
-	cargo clippy -- -D warnings
+	cargo clippy --workspace --all-targets --locked -- -D warnings
 
 typos: ## Check for typos (requires typos-cli)
 	typos || true
@@ -80,7 +80,7 @@ bench-diff: ## Compare against saved baseline
 # ── Security ─────────────────────────────────────────────────────────────────
 
 audit: ## Check for security vulnerabilities
-	cargo audit
+	cargo audit --deny warnings
 
 outdated: ## Check for outdated dependencies
 	cargo outdated
@@ -89,13 +89,13 @@ outdated: ## Check for outdated dependencies
 
 release: test clippy ## Build production binary
 	@echo "🔨 Building optimized release..."
-	cargo build --release
+	cargo build --release --locked
 	@echo ""
 	@echo "📦 Binary: target/release/contribai"
 	@ls -lh target/release/contribai 2>/dev/null || ls -lh target/release/contribai.exe 2>/dev/null || true
 
 release-strip: ## Build + strip binary
-	cargo build --release
+	cargo build --release --locked
 	@strip target/release/contribai 2>/dev/null || strip target/release/contribai.exe 2>/dev/null || true
 	@echo "📦 Stripped binary:"
 	@ls -lh target/release/contribai 2>/dev/null || ls -lh target/release/contribai.exe 2>/dev/null || true

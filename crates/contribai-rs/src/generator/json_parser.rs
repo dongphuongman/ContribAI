@@ -249,6 +249,57 @@ impl ContributionGenerator<'_> {
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
+/// Validate that parsed JSON matches the expected change schema.
+pub fn validate_change_schema(value: &serde_json::Value) -> bool {
+    let changes = match value.get("changes").and_then(|value| value.as_array()) {
+        Some(changes) if !changes.is_empty() => changes,
+        _ => return false,
+    };
+
+    for change in changes {
+        if change
+            .get("path")
+            .and_then(|value| value.as_str())
+            .is_none()
+            || change
+                .get("is_new_file")
+                .and_then(|value| value.as_bool())
+                .is_none()
+        {
+            return false;
+        }
+
+        if change["is_new_file"].as_bool().unwrap_or(false) {
+            if change
+                .get("content")
+                .and_then(|value| value.as_str())
+                .is_none()
+            {
+                return false;
+            }
+            continue;
+        }
+
+        let edits = match change.get("edits").and_then(|value| value.as_array()) {
+            Some(edits) => edits,
+            None => return false,
+        };
+        if edits.iter().any(|edit| {
+            edit.get("search")
+                .and_then(|value| value.as_str())
+                .is_none()
+                || edit
+                    .get("replace")
+                    .and_then(|value| value.as_str())
+                    .is_none()
+        }) {
+            return false;
+        }
+    }
+
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -344,73 +395,3 @@ mod tests {
 }
 
 // ── JSON Schema Validation (Sprint 22) ──────────────────────────────────────
-
-/// Validate that parsed JSON matches the expected change schema.
-///
-/// Required structure:
-/// ```json
-/// {
-///   "changes": [
-///     {
-///       "path": "string",
-///       "is_new_file": boolean,
-///       "edits": [{"search": "string", "replace": "string"}]  // for existing files
-///       // OR
-///       "content": "string"  // for new files
-///     }
-///   ]
-/// }
-/// ```
-pub fn validate_change_schema(value: &serde_json::Value) -> bool {
-    // Must have "changes" key with array value
-    let changes = match value.get("changes").and_then(|v| v.as_array()) {
-        Some(arr) => arr,
-        None => return false,
-    };
-
-    if changes.is_empty() {
-        return false;
-    }
-
-    for change in changes {
-        // Must have "path" as string
-        if change.get("path").and_then(|v| v.as_str()).is_none() {
-            return false;
-        }
-
-        // Must have "is_new_file" as boolean
-        if change
-            .get("is_new_file")
-            .and_then(|v| v.as_bool())
-            .is_none()
-        {
-            return false;
-        }
-
-        let is_new = change["is_new_file"].as_bool().unwrap_or(false);
-
-        if is_new {
-            // New files must have "content"
-            if change.get("content").and_then(|v| v.as_str()).is_none() {
-                return false;
-            }
-        } else {
-            // Existing files must have "edits" array
-            let edits = match change.get("edits").and_then(|v| v.as_array()) {
-                Some(arr) => arr,
-                None => return false,
-            };
-
-            for edit in edits {
-                if edit.get("search").and_then(|v| v.as_str()).is_none() {
-                    return false;
-                }
-                if edit.get("replace").and_then(|v| v.as_str()).is_none() {
-                    return false;
-                }
-            }
-        }
-    }
-
-    true
-}

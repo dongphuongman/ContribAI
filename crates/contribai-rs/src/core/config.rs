@@ -11,7 +11,7 @@ use super::permissions::PermissionConfig;
 use super::plugins::PluginSpec;
 
 /// Web server configuration (API auth + webhook).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct WebConfig {
     /// API keys accepted via `X-API-Key` header or `api_key` query param.
     /// Empty list means no authentication required.
@@ -27,6 +27,25 @@ pub struct WebConfig {
     pub tls_cert_path: Option<String>,
     /// Path to TLS private key file (PEM format).
     pub tls_key_path: Option<String>,
+}
+
+impl std::fmt::Debug for WebConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WebConfig")
+            .field(
+                "api_keys",
+                &format_args!("[REDACTED; {} configured]", self.api_keys.len()),
+            )
+            .field(
+                "webhook_secret",
+                &self.webhook_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("tls_enabled", &self.tls_enabled)
+            .field("tls_cert_path", &self.tls_cert_path)
+            .field("tls_key_path", &self.tls_key_path)
+            .finish()
+    }
 }
 
 impl Default for WebConfig {
@@ -200,6 +219,19 @@ impl ContribAIConfig {
         if self.llm.vertex_project.is_empty() {
             self.llm.vertex_project =
                 std::env::var("GOOGLE_CLOUD_PROJECT").unwrap_or_else(|_| resolve_gcloud_project());
+        }
+
+        if self.web.api_keys.is_empty() {
+            if let Ok(key) = std::env::var("CONTRIBAI_WEB_API_KEY") {
+                if !key.trim().is_empty() {
+                    self.web.api_keys.push(key);
+                }
+            }
+        }
+        if self.web.webhook_secret.is_none() {
+            self.web.webhook_secret = std::env::var("GITHUB_WEBHOOK_SECRET")
+                .ok()
+                .filter(|secret| !secret.trim().is_empty());
         }
     }
 }
@@ -565,7 +597,7 @@ pub struct PipelineConfig {
     pub max_retries: u32,
     #[serde(default = "default_min_quality_score")]
     pub min_quality_score: f64,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub dry_run: bool,
     #[serde(default = "default_max_repos_per_run")]
     pub max_repos_per_run: usize,
@@ -602,7 +634,7 @@ pub struct PipelineConfig {
 }
 
 fn default_agent_mode() -> String {
-    "build".to_string()
+    "plan".to_string()
 }
 
 fn default_circuit_breaker_threshold() -> u32 {
@@ -640,7 +672,7 @@ impl Default for PipelineConfig {
         Self {
             max_retries: default_max_retries(),
             min_quality_score: default_min_quality_score(),
-            dry_run: false,
+            dry_run: true,
             max_repos_per_run: default_max_repos_per_run(),
             max_concurrent_repos: default_max_concurrent_repos(),
             risk_tolerance: default_risk_tolerance(),
@@ -732,7 +764,7 @@ fn default_scheduler_cron() -> String {
     "0 */6 * * *".to_string()
 }
 fn default_scheduler_enabled() -> bool {
-    true
+    false
 }
 
 impl Default for SchedulerConfig {
@@ -779,7 +811,7 @@ impl Default for QuotaConfig {
 }
 
 /// Notification channel configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct NotificationConfig {
     /// Slack incoming webhook URL.
     pub slack_webhook: Option<String>,
@@ -789,6 +821,29 @@ pub struct NotificationConfig {
     pub telegram_token: Option<String>,
     /// Telegram chat ID to send messages to.
     pub telegram_chat_id: Option<String>,
+}
+
+impl std::fmt::Debug for NotificationConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NotificationConfig")
+            .field(
+                "slack_webhook",
+                &self.slack_webhook.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "discord_webhook",
+                &self.discord_webhook.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "telegram_token",
+                &self.telegram_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "telegram_chat_id",
+                &self.telegram_chat_id.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 /// Sandbox execution configuration.
@@ -861,6 +916,8 @@ mod tests {
         assert_eq!(config.llm.model, "gemini-3-flash-preview");
         assert_eq!(config.analysis.max_context_tokens, 30_000);
         assert_eq!(config.pipeline.min_quality_score, 0.6);
+        assert!(config.pipeline.dry_run);
+        assert_eq!(config.pipeline.agent_mode, "plan");
     }
 
     #[test]
@@ -900,14 +957,14 @@ analysis:
     fn test_scheduler_config_defaults() {
         let s = SchedulerConfig::default();
         assert_eq!(s.cron, "0 */6 * * *");
-        assert!(s.enabled);
+        assert!(!s.enabled);
     }
 
     #[test]
     fn test_scheduler_config_deser_empty() {
         let s: SchedulerConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(s.cron, "0 */6 * * *");
-        assert!(s.enabled);
+        assert!(!s.enabled);
     }
 
     #[test]
@@ -915,7 +972,7 @@ analysis:
         let yaml = "cron: \"0 0 * * *\"";
         let s: SchedulerConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(s.cron, "0 0 * * *");
-        assert!(s.enabled); // default preserved
+        assert!(!s.enabled); // safe default preserved
     }
 
     // -------------------------------------------------------------------------
@@ -1061,7 +1118,7 @@ analysis:
     fn test_root_config_has_new_fields() {
         let cfg = ContribAIConfig::default();
         // scheduler
-        assert!(cfg.scheduler.enabled);
+        assert!(!cfg.scheduler.enabled);
         assert_eq!(cfg.scheduler.cron, "0 */6 * * *");
         // quotas
         assert_eq!(cfg.quotas.github_daily, 1000);
@@ -1100,5 +1157,20 @@ sandbox:
         );
         assert!(cfg.sandbox.enabled);
         assert_eq!(cfg.sandbox.timeout_seconds, 60);
+    }
+
+    #[test]
+    fn shipped_configuration_files_match_the_current_schema() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for name in ["config.example.yaml", "config.yaml.template"] {
+            let path = root.join(name);
+            let yaml = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+            let config: ContribAIConfig = serde_yaml::from_str(&yaml)
+                .unwrap_or_else(|error| panic!("invalid {}: {error}", path.display()));
+            assert!(config.pipeline.dry_run, "{name} must default to dry-run");
+            assert_eq!(config.pipeline.agent_mode, "plan");
+            assert!(!config.scheduler.enabled);
+        }
     }
 }

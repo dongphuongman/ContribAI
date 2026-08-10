@@ -2,368 +2,268 @@
 
 # ContribAI
 
-**Autonomous AI agent that discovers, analyzes, and submits<br>Pull Requests to open source projects on GitHub.**
+**A maintainer-governed admission and evidence layer for AI-assisted open source contributions.**
 
-[![Rust](https://img.shields.io/badge/Rust-1.75+-f74c00?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/v6.8.0-blue?style=for-the-badge&logo=github&logoColor=white)](https://github.com/tang-vu/ContribAI/releases)
-[![License](https://img.shields.io/badge/AGPL--3.0-green?style=for-the-badge&logo=opensourceinitiative&logoColor=white)](LICENSE)
-[![Tests](https://img.shields.io/badge/602_tests-passing-brightgreen?style=for-the-badge&logo=checkmarx&logoColor=white)](#testing)
-[![PRs Merged](https://img.shields.io/badge/10_PRs-merged-blueviolet?style=for-the-badge&logo=git&logoColor=white)](HALL_OF_FAME.md)
+[![CI](https://github.com/tang-vu/ContribAI/actions/workflows/ci.yml/badge.svg)](https://github.com/tang-vu/ContribAI/actions/workflows/ci.yml)
+[![Rust](https://img.shields.io/badge/Rust-stable-f74c00?logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![License](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-666%20passing-brightgreen)](#verification)
 
-<br>
-
-[**Getting Started**](#-getting-started) · [**Features**](#-features) · [**Commands**](#-commands) · [**Architecture**](#-architecture) · [**Hall of Fame**](HALL_OF_FAME.md)
-
-<br>
-
-```
-Set it up once. Wake up to merged PRs.
-```
+[Why ContribAI](#why-contribai) · [Safety model](#safety-model) · [Quick start](#quick-start) · [Consent protocol](#consent-protocol) · [Architecture](#architecture)
 
 </div>
 
----
+ContribAI analyzes repositories and prepares small, reviewable changes. It does **not** treat a
+public repository as permission to write. Submission is a separate capability that must be enabled
+by the operator, authorized by the target maintainer, bounded by policy, reviewed by a human, and
+published as a draft pull request with an evidence receipt.
 
-## 🏆 Track Record
-
-<table>
-<tr>
-<td width="50%">
-
-| Metric | |
-|:-------|------:|
-| **PRs Submitted** | `44+` |
-| **PRs Merged** | `10` |
-| **Repos Contributed** | `21+` |
-| **Languages Analyzed** | `13` |
-
-</td>
-<td width="50%">
-
-**Notable Contributions:**
-
-🌍 `Worldmonitor` — 45k ⭐ · 3 merged<br>
-🕵️ `Maigret` — 19k ⭐ · 3 merged<br>
-🤖 `AI-Research-SKILLs` — 6k ⭐ · 1 merged<br>
-📊 `s-tui` — 5k ⭐ · 1 merged<br>
-🔍 `HolmesGPT` — 2k ⭐ · 1 merged
-
-</td>
-</tr>
-</table>
-
-> See the full **[Hall of Fame →](HALL_OF_FAME.md)** for every PR with links.
-
----
-
-## ⚡ How It Works
-
-```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│  Discovery  │────▶│  Analysis   │────▶│  Generator  │────▶│  PR + CI    │────▶│   Patrol    │
-│             │     │             │     │             │     │             │     │             │
-│ Search repos│     │ 13-lang AST │     │ LLM-powered │     │ Fork, commit│     │ Auto-fix    │
-│ by language │     │ 27 skills   │     │ code gen +  │     │ create PR   │     │ review      │
-│ and stars   │     │ security,   │     │ self-review │     │ sign CLA    │     │ feedback    │
-│             │     │ quality,    │     │ + scoring   │     │ monitor CI  │     │ & reply     │
-│             │     │ performance │     │             │     │             │     │             │
-└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
+```text
+public code ≠ permission to submit
+generation ≠ admission
+passing checks ≠ maintainer approval
 ```
 
----
+## Why ContribAI
 
-## 🚀 Getting Started
+AI can make code generation cheap while making review expensive. The failure mode is not merely
+bad code; it is uninvited work that transfers verification cost to maintainers. ContribAI is built
+around the opposite incentive:
 
-### Install
+- **Maintainer intent first.** A repository manifest or maintainer-controlled issue label is
+  required before an external proposal can be submitted.
+- **Read-only by default.** Discovery, analysis, scheduling, patrol, and MCP start without external
+  write capability.
+- **Evidence over confidence.** Every admitted proposal records consent source, base revision,
+  changed paths, changed-line budget, deterministic change fingerprint, and validation checks.
+- **Bounded proposals.** Protected governance files, unapproved paths, expired permits, oversized
+  changes, failed checks, and missing base revisions fail closed.
+- **Human accountability.** The CLI requires an explicit review decision. Pull requests are always
+  drafts. ContribAI never signs a CLA or merges code.
+
+This is a tool for maintainers and accountable contributors—not a contribution-farming bot.
+
+## Safety model
+
+An external draft can be created only when every gate passes:
+
+```text
+operator --submit
+      │
+      ▼
+repository manifest OR maintainer issue label
+      │
+      ▼
+24-hour ContributionPermit bound to repository + base SHA
+      │
+      ▼
+scope, protected-path, size, risk, quality, and validation checks
+      │
+      ▼
+interactive human review
+      │
+      ▼
+draft PR + EvidenceCapsule
+```
+
+Important invariants:
+
+| Invariant | Enforcement |
+|---|---|
+| No implicit write access | Pipeline write capability defaults to off |
+| No unsolicited proposal | Repository consent or approved issue label required |
+| No moving-base ambiguity | Contribution branch starts at the attested commit SHA |
+| No governance takeover | License, policy, workflow, funding, CODEOWNERS, and agent instruction paths are protected |
+| No silent publication | GitHub PR creation always sets `draft: true` |
+| No delegated legal act | CLA signing is never exposed through CLI automation or MCP |
+| No hidden MCP mutation | MCP advertises read-only tools unless explicitly started with `--allow-writes` |
+
+See [the threat model](docs/THREAT_MODEL.md) and
+[the consent protocol](docs/CONSENT_PROTOCOL.md) for precise boundaries.
+
+## Quick start
+
+### Build from source
+
+Requirements: Rust stable, Git, and a GitHub token with the minimum permissions needed for the
+operation you choose.
 
 ```bash
-# Build from source (recommended)
-git clone https://github.com/tang-vu/ContribAI.git && cd ContribAI
-cargo install --path crates/contribai-rs
-
-# Or one-line install
-curl -fsSL https://raw.githubusercontent.com/tang-vu/ContribAI/main/install.sh | bash
-# Windows:
-irm https://raw.githubusercontent.com/tang-vu/ContribAI/main/install.ps1 | iex
+git clone https://github.com/tang-vu/ContribAI.git
+cd ContribAI
+cargo install --path crates/contribai-rs --locked
+contribai doctor
 ```
 
-### Configure
+Configure secrets through environment variables instead of committing them:
 
 ```bash
-contribai init     # Interactive setup wizard
-contribai login    # Verify auth + switch LLM providers
+export GITHUB_TOKEN="..."
+export GEMINI_API_KEY="..."       # or OPENAI_API_KEY / ANTHROPIC_API_KEY
+contribai init
 ```
 
-### Run
+### Start safely
+
+These commands do not submit anything:
 
 ```bash
-contribai hunt                # Autonomous: discover → analyze → PR
-contribai target <repo_url>   # Target a specific repo
-contribai analyze <repo_url>  # Dry-run analysis (no PRs)
-contribai interactive         # Browse in ratatui TUI
+contribai analyze https://github.com/owner/repo
+contribai target https://github.com/owner/repo
+contribai run
+contribai patrol
+contribai mcp-server
 ```
 
-<details>
-<summary>📝 <strong>Example config.yaml</strong></summary>
+To request an admitted draft proposal:
+
+```bash
+contribai target https://github.com/owner/repo --submit
+contribai solve https://github.com/owner/repo --submit
+```
+
+`--submit` is necessary but not sufficient. The repository must opt in, every check must pass, and
+the local operator must approve the exact evidence-bearing change interactively.
+
+## Consent protocol
+
+Maintainers can opt in repository-wide with `.github/CONTRIBAI_ALLOW`:
 
 ```yaml
-github:
-  token: "ghp_your_token"       # or set GITHUB_TOKEN env var
-
-llm:
-  provider: "gemini"            # gemini | openai | anthropic | ollama | vertex
-  model: "gemini-3-flash-preview"
-  api_key: "your_api_key"       # or set GEMINI_API_KEY env var
-  # base_url: "https://api.openai.com/v1"  # Optional: override default endpoint for OpenAI-compatible providers
-
-discovery:
-  languages:                    # default: all 15 languages
-    - python
-    - javascript
-    - typescript
-    - go
-    - rust
-  stars_range: [100, 5000]
+enabled: true
+max_files: 3
+max_changed_lines: 120
+allowed_paths: src/**, tests/**
 ```
 
-See [`config.yaml.template`](config.yaml.template) for all options.
+For narrower approval, apply one of these labels to an issue:
 
-</details>
+- `agent-ready`
+- `contribai-approved`
+- `ai-contribution-approved`
 
----
+Issue approval is scoped to that issue. Repository consent is still bounded by its path and size
+budgets. Missing, malformed, or disabled consent is a denial.
 
-## ✨ Features
+## Evidence Capsule
 
-<table>
-<tr>
-<td width="50%" valign="top">
+Each admitted draft includes a compact receipt such as:
 
-### 🔍 Code Analysis
-- **13-language AST** via tree-sitter
-- Security: SQLi, XSS, resource leaks
-- Code quality, complexity, dead code
-- Performance bottlenecks
-- Documentation gaps
-- **27 progressive skills** loaded on-demand
+```text
+Permit:               1d28…
+Consent:              maintainer label `agent-ready` on #42
+Base revision:         7a93…
+Change fingerprint:    c441…
+Scope:                 2 files / 37 changed lines
+Submission mode:       draft only
+Checks:                admission, quality, risk, validation
+```
 
-### 🤖 Multi-LLM Support
-- **Gemini 3.x** (default) — Flash, Pro, Lite tiers
-- OpenAI, Anthropic, Ollama, Vertex AI
-- Smart task routing across model tiers
-- 5 specialized sub-agents
+The capsule makes the proposal reproducible and reviewable. It is an audit receipt generated by
+the local process, not a substitute for CI, code review, provenance attestation, or maintainer
+judgment.
 
-### 🎯 Hunt Mode
-- Multi-round autonomous hunting
-- Issue-first strategy
-- Cross-file fixes
-- Outcome learning per repo
+## Capabilities
 
-</td>
-<td width="50%" valign="top">
+- Tree-sitter analysis for 13 languages, with additional fallback language mappings
+- Security, correctness, performance, testing, documentation, and code-quality analysis
+- Cross-file symbol and import context
+- Multi-provider LLM support: Gemini, OpenAI, Anthropic, Ollama, Vertex AI, and Copilot routing
+- SQLite outcome memory and repository-specific preferences
+- Local/Docker validation, risk classification, quality scoring, and circuit breaking
+- Ratatui interface, read-only-by-default MCP server, and authenticated web dashboard
+- Draft PR lifecycle and explicit patrol response capability
 
-### 👁 PR Patrol
-- Monitors PRs for review feedback
-- LLM-classifies maintainer comments
-- Auto-pushes code fixes
-- Auto-replies to questions
-- Auto-cleans stale PRs from memory
+The Python implementation under `python/` is legacy reference code. Rust under
+`crates/contribai-rs/` is the maintained implementation.
 
-### 🔌 Integrations
-- **MCP Server** — 21 tools for Claude Desktop
-- **Web Dashboard** — axum REST API at `:8787`
-- **Cron Scheduler** — automated runs
-- **Docker** — compose-ready deployment
-- **Webhooks** — Slack, Discord, Telegram
+## Command model
 
-### 🛡 Safety
-- AI policy detection
-- CLA auto-signing
-- Quality gate scoring
-- Duplicate PR prevention
-- Protected file guardrails
+| Command | Default behavior | Explicit mutation capability |
+|---|---|---|
+| `analyze <url>` | Analyze only | None |
+| `target <url>` | Analyze and prepare candidate | `--submit` |
+| `run` | Discover and assess | `--submit` |
+| `hunt` | Multi-round assessment | `--submit` |
+| `solve <url>` | Analyze issues | `--submit` |
+| `watchlist` | Assess configured repositories | `--submit` |
+| `patrol` | Read review state | `--respond` |
+| `mcp-server` | Advertise read-only tools | `--allow-writes` (never PR creation or CLA signing) |
 
-</td>
-</tr>
-</table>
+Run `contribai <command> --help` for the complete interface.
 
-### Supported Languages
+## Architecture
 
-| Deep AST (tree-sitter) | Fallback Parser |
-|:----------------------:|:---------------:|
-| Python · JavaScript · TypeScript · Go · Rust · Java | Kotlin → Java |
-| C · C++ · Ruby · PHP · C# · HTML · CSS | Swift → Java · Vue/Svelte → HTML |
+```text
+CLI / TUI / MCP
+       │
+       ▼
+Discovery ──► Analysis ──► Generation ──► Validation
+                                            │
+                                            ▼
+                                     AdmissionController
+                                      │ consent
+                                      │ permit + base SHA
+                                      │ scope + risk
+                                      │ evidence checks
+                                      ▼
+                                      Human review
+                                            │
+                                            ▼
+                                      Draft PR only
+```
 
----
+The main Rust modules are:
 
-## 📖 Commands
+- `core/admission.rs` — consent, permits, scope enforcement, evidence capsules
+- `orchestrator/pipeline.rs` — read and write capability orchestration
+- `analysis/` — AST intelligence, triage, repository context, progressive skills
+- `generator/` — candidate generation, validation, risk, scoring, self-review
+- `github/` — resilient GitHub REST and GraphQL client
+- `pr/` — evidence-required draft lifecycle and patrol
+- `mcp/` — capability-aware MCP surface
+- `web/` — local dashboard and authenticated remote API surface
 
-ContribAI ships with **40+ commands** accessible via CLI or interactive menu.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for implementation details.
 
-<details>
-<summary>🔥 <strong>Hunt & Contribute</strong></summary>
+## Configuration
+
+Copy [config.example.yaml](config.example.yaml) to `config.yaml`, or use `contribai init`.
+Safe defaults include:
+
+- `pipeline.dry_run: true`
+- `pipeline.agent_mode: plan`
+- `scheduler.enabled: false`
+- validation required
+- web bound to localhost unless authentication is configured
+
+Secrets may be loaded from environment variables. Never commit `config.yaml`, tokens, webhook
+secrets, local databases, or event logs.
+
+## Verification
 
 ```bash
-contribai hunt                        # Autonomous discovery + PRs
-contribai hunt --dry-run              # Analyze only, no PRs
-contribai run                         # Single pipeline run
-contribai target <url>                # Target specific repo
-contribai analyze <url>               # Dry-run analysis
-contribai solve <url>                 # Solve open issues
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo build --workspace --release
 ```
 
-</details>
+The current workspace runs **666 passing tests** plus one intentionally ignored doctest.
 
-<details>
-<summary>📊 <strong>Monitor & Stats</strong></summary>
+## Project policy
 
-```bash
-contribai patrol                      # Respond to PR reviews
-contribai status                      # PR status table
-contribai stats                       # Contribution statistics
-contribai leaderboard                 # Merge rate by repo
-contribai system-status               # DB, rate limits, scheduler
-```
+- AI-assisted contributions are welcome when disclosed and owned by a human contributor.
+- Generated output receives no special trust and must satisfy the same review bar as human-written
+  code.
+- Do not use this project for bulk unsolicited issues, pull requests, comments, follows, or stars.
+- Respect repository policy, rate limits, maintainer attention, licenses, and contributor identity.
+- Security reports belong in private GitHub Security Advisories, not public issues.
 
-</details>
+Read [CONTRIBUTING.md](CONTRIBUTING.md), [GOVERNANCE.md](GOVERNANCE.md),
+[SECURITY.md](SECURITY.md), and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) before contributing.
 
-<details>
-<summary>🖥️ <strong>Interactive & Config</strong></summary>
+## License
 
-```bash
-contribai                             # Interactive menu (22 items)
-contribai interactive                 # ratatui TUI browser
-contribai init                        # Setup wizard
-contribai login                       # Interactive auth + provider config
-contribai config-list                 # Show all config
-contribai config-get llm.provider     # Get config value
-contribai config-set llm.provider openai  # Set config value
-contribai profile security-focused    # Named profile
-```
-
-</details>
-
-<details>
-<summary>🌐 <strong>Servers & Tools</strong></summary>
-
-```bash
-contribai web-server                  # Dashboard at :8787
-contribai schedule                    # Cron scheduler
-contribai mcp-server                  # MCP stdio server
-contribai cleanup                     # Remove stale forks
-contribai notify-test                 # Test Slack/Discord/Telegram
-```
-
-</details>
-
----
-
-## 🏗 Architecture
-
-```
-ContribAI/
-├── crates/contribai-rs/src/        ← Rust v6.8.0 (primary)
-│   ├── cli/                        40+ commands + ratatui TUI
-│   ├── core/                       Config, events, error types
-│   ├── github/                     REST v3 + GraphQL client
-│   ├── analysis/                   13-lang AST + 27 skills
-│   ├── generator/                  LLM code generation + scoring
-│   ├── orchestrator/               Pipeline + SQLite memory (72h TTL)
-│   ├── llm/                        Multi-provider + 5 sub-agents
-│   ├── pr/                         PR lifecycle + patrol + CI
-│   ├── mcp/                        21-tool MCP server (stdio)
-│   ├── web/                        axum dashboard + webhooks
-│   ├── sandbox/                    Docker + local fallback
-│   └── tools/                      Tool protocol interface
-│
-└── python/                         Legacy v4.1.0 (reference only)
-```
-
-<details>
-<summary>🔧 <strong>Tech Stack</strong></summary>
-
-| Layer | Technology |
-|:------|:-----------|
-| Language | **Rust 2021** (primary), Python 3.11+ (legacy) |
-| Async | Tokio (full), async/await throughout |
-| HTTP | reqwest 0.12 (async, rustls-tls) |
-| Database | SQLite (rusqlite, bundled) |
-| LLM | Gemini 3.x, OpenAI, Anthropic, Ollama, Vertex AI |
-| GitHub | REST API v3 + GraphQL |
-| AST | tree-sitter (13 languages) |
-| Web | axum 0.7 + tower-http |
-| TUI | ratatui + crossterm |
-| CLI | clap v4 + dialoguer + colored |
-| Tests | 602 tests (mockall, wiremock, tokio-test, criterion) |
-
-</details>
-
-See [`docs/system-architecture.md`](docs/system-architecture.md) for the full design.
-
----
-
-## 🧪 Testing
-
-```bash
-cargo test                  # Run all 602 tests
-cargo test -- --nocapture   # With stdout output
-cargo test ast_intel        # AST module tests only
-cargo clippy                # Lint check
-```
-
----
-
-## 🔌 MCP Server
-
-Use ContribAI as a tool provider for **Claude Desktop** or **Antigravity IDE**:
-
-```json
-{
-  "mcpServers": {
-    "contribai": {
-      "command": "contribai",
-      "args": ["mcp-server"]
-    }
-  }
-}
-```
-
-> 21 tools available: repo analysis, PR management, GitHub search, issue solving, memory queries, and more.
-
----
-
-## 🐳 Docker
-
-```bash
-docker compose up -d dashboard            # Dashboard at :8787
-docker compose run --rm runner run        # One-shot pipeline run
-docker compose up -d dashboard scheduler  # Dashboard + cron scheduler
-```
-
----
-
-## 📚 Documentation
-
-| Document | Description |
-|:---------|:------------|
-| [**Hall of Fame**](HALL_OF_FAME.md) | 10 merged · 14 closed across 21+ repos |
-| [**AGENTS.md**](AGENTS.md) | AI agent guide — architecture, patterns, CLI reference |
-| [**Deployment Guide**](docs/deployment-guide.md) | Install, Docker, config, all 22 CLI commands |
-| [**System Architecture**](docs/system-architecture.md) | Pipeline, middleware, events, LLM routing |
-| [**Codebase Summary**](docs/codebase-summary.md) | Module map, tech stack, data structures |
-| [**Project Roadmap**](docs/project-roadmap.md) | Version history and future plans |
-
----
-
-## 📄 License
-
-**AGPL-3.0 + Commons Clause** — see [LICENSE](LICENSE) for details.
-
----
-
-<div align="center">
-
-**Built with Rust 🦀 and LLMs 🤖**
-
-[Releases](https://github.com/tang-vu/ContribAI/releases) · [Issues](https://github.com/tang-vu/ContribAI/issues) · [Hall of Fame](HALL_OF_FAME.md)
-
-</div>
+ContribAI is free and open source software licensed under
+[AGPL-3.0-or-later](LICENSE). The former Commons Clause restriction has been removed.

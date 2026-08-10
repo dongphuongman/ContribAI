@@ -943,9 +943,9 @@ CONSTANT = "hello"
             .filter(|s| s.kind == SymbolKind::Import)
             .collect();
 
-        assert!(funcs.len() >= 1, "Should find standalone_func");
+        assert!(!funcs.is_empty(), "Should find standalone_func");
         assert_eq!(classes.len(), 1, "Should find MyClass");
-        assert!(imports.len() >= 1, "Should find imports");
+        assert!(!imports.is_empty(), "Should find imports");
     }
 
     #[test]

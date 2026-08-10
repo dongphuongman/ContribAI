@@ -139,6 +139,11 @@ pub fn print_result(result: &contribai::orchestrator::pipeline::PipelineResult, 
         result.prs_created.to_string().green().bold()
     );
 
+    println!(
+        "  Submissions blocked:        {}",
+        result.submissions_blocked.to_string().yellow().bold()
+    );
+
     if !result.errors.is_empty() {
         println!(
             "  ⚠️ Errors:                 {}",

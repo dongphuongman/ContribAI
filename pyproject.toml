@@ -7,14 +7,14 @@ name = "contribai-python"
 version = "4.1.0"
 description = "[LEGACY] Python implementation of ContribAI — use the Rust version (v5.1.0+)"
 readme = "python/README_PYTHON.md"
-license = { text = "MIT" }
+license = { text = "AGPL-3.0-or-later" }
 requires-python = ">=3.11"
 authors = [{ name = "ContribAI Team" }]
 keywords = ["ai", "agent", "github", "open-source", "contributions"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",

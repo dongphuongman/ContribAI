@@ -302,8 +302,8 @@ mod tests {
         let d1 = r.delay_ms(1);
         let d2 = r.delay_ms(2);
         // Exponential: base grows 1000, 2000, 4000
-        assert!(d0 >= 1000 && d0 <= 1500, "d0={}", d0);
-        assert!(d1 >= 2000 && d1 <= 3000, "d1={}", d1);
-        assert!(d2 >= 4000 && d2 <= 6000, "d2={}", d2);
+        assert!((1000..=1500).contains(&d0), "d0={}", d0);
+        assert!((2000..=3000).contains(&d1), "d1={}", d1);
+        assert!((4000..=6000).contains(&d2), "d2={}", d2);
     }
 }

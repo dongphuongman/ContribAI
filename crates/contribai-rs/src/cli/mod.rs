@@ -18,7 +18,7 @@ pub use common::{
 
 use clap::{Parser, Subcommand};
 
-/// ContribAI — AI agent that autonomously contributes to open source.
+/// ContribAI — maintainer-governed admission and evidence for AI contributions.
 ///
 /// Run without arguments for interactive menu mode.
 #[derive(Parser)]
@@ -36,9 +36,34 @@ pub struct Cli {
     command: Option<Commands>,
 }
 
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+
+    #[test]
+    fn submission_capability_is_off_by_default() {
+        let cli = Cli::try_parse_from(["contribai", "run"]).expect("valid CLI");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Run { submit: false, .. })
+        ));
+    }
+
+    #[test]
+    fn mcp_write_capability_is_off_by_default() {
+        let cli = Cli::try_parse_from(["contribai", "mcp-server"]).expect("valid CLI");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::McpServer {
+                allow_writes: false
+            })
+        ));
+    }
+}
+
 #[derive(Subcommand)]
 enum Commands {
-    /// Auto-discover repos, analyze code, and submit PRs
+    /// Discover repositories and produce reviewable contribution candidates
     Run {
         /// Target language filter
         #[arg(short, long)]
@@ -52,16 +77,16 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
 
+        /// Request a draft PR; maintainer opt-in and interactive review remain mandatory
+        #[arg(long)]
+        submit: bool,
+
         /// Approve HIGH risk changes for auto-submission
         #[arg(long)]
         approve: bool,
-
-        /// Agent mode: "build" (full PR flow) or "plan" (read-only analysis)
-        #[arg(long, default_value = "build")]
-        mode: String,
     },
 
-    /// Hunt mode: aggressive multi-round discovery
+    /// Multi-round discovery and evidence analysis
     Hunt {
         /// Number of discovery rounds
         #[arg(short, long, default_value = "5")]
@@ -79,6 +104,10 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
 
+        /// Request draft submissions; every target repo must explicitly opt in
+        #[arg(long)]
+        submit: bool,
+
         /// Approve HIGH risk changes for auto-submission
         #[arg(long)]
         approve: bool,
@@ -89,6 +118,10 @@ enum Commands {
         /// Dry run — check but don't respond
         #[arg(long)]
         dry_run: bool,
+
+        /// Allow replies or pushes after an explicit operator request
+        #[arg(long)]
+        respond: bool,
     },
 
     /// Target a specific repository
@@ -99,6 +132,10 @@ enum Commands {
         /// Dry run
         #[arg(long)]
         dry_run: bool,
+
+        /// Request a draft PR; maintainer opt-in and interactive review remain mandatory
+        #[arg(long)]
+        submit: bool,
     },
 
     /// Sweep all repositories in the watchlist (config.discovery.watchlist)
@@ -106,10 +143,18 @@ enum Commands {
         /// Dry run — analyze but don't submit PRs
         #[arg(long)]
         dry_run: bool,
+
+        /// Request draft submissions; every target repo must explicitly opt in
+        #[arg(long)]
+        submit: bool,
     },
 
     /// Start MCP server for Claude/Antigravity integration
-    McpServer,
+    McpServer {
+        /// Expose mutating tools; CLA signing remains unavailable
+        #[arg(long)]
+        allow_writes: bool,
+    },
 
     /// Start the web dashboard API server
     WebServer {
@@ -153,6 +198,10 @@ enum Commands {
         /// Dry run — classify but don't create PRs
         #[arg(long)]
         dry_run: bool,
+
+        /// Request draft PRs only for maintainer-approved issues
+        #[arg(long)]
+        submit: bool,
     },
 
     /// Show submitted PRs and their statuses
@@ -348,16 +397,16 @@ impl Cli {
                 language,
                 stars,
                 dry_run,
+                submit,
                 approve,
-                mode,
             } => {
                 commands::run::run_run(
                     self.config.as_deref(),
                     language,
                     stars,
                     dry_run,
+                    submit,
                     approve,
-                    mode,
                 )
                 .await
             }
@@ -366,6 +415,7 @@ impl Cli {
                 delay,
                 language,
                 dry_run,
+                submit,
                 approve,
             } => {
                 commands::hunt::run_hunt(
@@ -374,27 +424,32 @@ impl Cli {
                     delay,
                     language,
                     dry_run,
+                    submit,
                     approve,
                 )
                 .await
             }
-            Commands::Patrol { dry_run } => {
-                commands::patrol::run_patrol(self.config.as_deref(), dry_run).await
+            Commands::Patrol { dry_run, respond } => {
+                commands::patrol::run_patrol(self.config.as_deref(), dry_run || !respond).await
             }
-            Commands::Watchlist { dry_run } => {
-                commands::watchlist::run_watchlist(self.config.as_deref(), dry_run).await
+            Commands::Watchlist { dry_run, submit } => {
+                commands::watchlist::run_watchlist(self.config.as_deref(), dry_run, submit).await
             }
-            Commands::Target { url, dry_run } => {
-                commands::target::run_target(self.config.as_deref(), url, dry_run).await
-            }
+            Commands::Target {
+                url,
+                dry_run,
+                submit,
+            } => commands::target::run_target(self.config.as_deref(), url, dry_run, submit).await,
             Commands::Analyze { url } => {
                 commands::analyze::run_analyze(self.config.as_deref(), url).await
             }
-            Commands::Solve { url, dry_run } => {
-                commands::solve::run_solve(self.config.as_deref(), url, dry_run).await
-            }
-            Commands::McpServer => {
-                commands::mcp_server::run_mcp_server(self.config.as_deref()).await
+            Commands::Solve {
+                url,
+                dry_run,
+                submit,
+            } => commands::solve::run_solve(self.config.as_deref(), url, dry_run, submit).await,
+            Commands::McpServer { allow_writes } => {
+                commands::mcp_server::run_mcp_server(self.config.as_deref(), allow_writes).await
             }
             Commands::Stats => commands::stats::run_stats(self.config.as_deref()).await,
             Commands::Status { filter, limit } => {
@@ -498,18 +553,18 @@ fn run_interactive_menu() -> anyhow::Result<Commands> {
     println!(
         "  {} — {}",
         style("ContribAI").cyan().bold(),
-        style("AI Agent for Open Source Contributions").dim()
+        style("Maintainer-Governed AI Contribution Evidence").dim()
     );
     println!();
 
     let items = vec![
         "🖥️   Interactive  — full TUI browser (PRs, repos, actions)",
-        "🚀  Run          — discover repos and submit PRs",
+        "🚀  Run          — discover and assess contribution candidates",
         "🎯  Target       — analyze a specific repo",
         "🔍  Analyze      — dry-run analysis only",
         "🐛  Solve        — solve open issues",
         "👁   Patrol       — monitor open PRs",
-        "🕵️  Hunt         — aggressive multi-round hunt",
+        "🕵️  Hunt         — multi-round evidence discovery",
         "📊  Stats        — contribution statistics",
         "📋  Leaderboard  — merge rate & repo rankings",
         "📋  Status       — show submitted PRs",
@@ -544,8 +599,8 @@ fn run_interactive_menu() -> anyhow::Result<Commands> {
             language: None,
             stars: None,
             dry_run: false,
+            submit: false,
             approve: false,
-            mode: "build".to_string(),
         },
         2 => {
             let url: String = dialoguer::Input::new()
@@ -553,7 +608,8 @@ fn run_interactive_menu() -> anyhow::Result<Commands> {
                 .interact_text()?;
             Commands::Target {
                 url,
-                dry_run: false,
+                dry_run: true,
+                submit: false,
             }
         }
         3 => {
@@ -568,15 +624,20 @@ fn run_interactive_menu() -> anyhow::Result<Commands> {
                 .interact_text()?;
             Commands::Solve {
                 url,
-                dry_run: false,
+                dry_run: true,
+                submit: false,
             }
         }
-        5 => Commands::Patrol { dry_run: false },
+        5 => Commands::Patrol {
+            dry_run: true,
+            respond: false,
+        },
         6 => Commands::Hunt {
             rounds: 5,
             delay: 30,
             language: None,
-            dry_run: false,
+            dry_run: true,
+            submit: false,
             approve: false,
         },
         7 => Commands::Stats,

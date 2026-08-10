@@ -5,10 +5,11 @@
 //! Direct port from Python `github/client.py` — httpx → reqwest.
 
 use base64::Engine;
-use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, RETRY_AFTER, USER_AGENT};
 use reqwest::{Client, Response, StatusCode};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::time::Duration;
 use tracing::{info, warn};
 
 use crate::core::error::{ContribError, Result};
@@ -17,6 +18,9 @@ use crate::core::models::{FileNode, Issue, Repository};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 const GITHUB_API: &str = "https://api.github.com";
+const MAX_REQUEST_ATTEMPTS: u32 = 3;
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(120);
+const MAX_ERROR_BODY_CHARS: usize = 4_096;
 
 /// Async GitHub REST API client.
 pub struct GitHubClient {
@@ -88,7 +92,7 @@ impl GitHubClient {
         RateLimitStatus {
             remaining,
             reset_at,
-            is_low: remaining < 100,
+            is_low: remaining < self.rate_limit_buffer,
         }
     }
 
@@ -115,20 +119,82 @@ impl GitHubClient {
     /// Sleep if rate limit is critically low (< buffer threshold).
     async fn maybe_throttle(&self) {
         let remaining = self.rate_remaining.load(Ordering::Relaxed);
-        if remaining > 0 && remaining < self.rate_limit_buffer {
+        if remaining < self.rate_limit_buffer {
             let reset = self.rate_reset_at.load(Ordering::Relaxed);
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs() as u32;
-            let wait = if reset > now { reset - now } else { 30 };
-            let wait = wait.min(120); // Cap at 2 minutes
+            let wait = reset.saturating_sub(now).min(120);
+            if wait == 0 {
+                return;
+            }
             warn!(
                 remaining,
                 reset_in_secs = wait,
                 "⏳ GitHub rate limit low, throttling"
             );
             tokio::time::sleep(std::time::Duration::from_secs(wait as u64)).await;
+        }
+    }
+
+    /// Only retry methods whose repeated execution has idempotent HTTP semantics.
+    /// Retrying a POST/PATCH after an ambiguous network failure can create duplicate
+    /// pull requests, comments, or issues.
+    fn is_retry_safe(method: &reqwest::Method) -> bool {
+        matches!(
+            *method,
+            reqwest::Method::GET
+                | reqwest::Method::HEAD
+                | reqwest::Method::PUT
+                | reqwest::Method::DELETE
+                | reqwest::Method::OPTIONS
+        )
+    }
+
+    /// Prefer server-provided backoff, then GitHub's reset timestamp, and finally
+    /// exponential backoff. The returned duration is intentionally not capped so
+    /// callers can fail fast instead of parking an agent for an unexpectedly long time.
+    fn retry_delay(headers: &HeaderMap, attempt: u32) -> Duration {
+        if let Some(seconds) = headers
+            .get(RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            return Duration::from_secs(seconds);
+        }
+
+        if let Some(reset_at) = headers
+            .get("x-ratelimit-reset")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            return Duration::from_secs(reset_at.saturating_sub(now));
+        }
+
+        Duration::from_secs(2u64.saturating_pow(attempt.saturating_sub(1)))
+    }
+
+    fn rate_limit_reset_description(headers: &HeaderMap) -> String {
+        headers
+            .get("x-ratelimit-reset")
+            .or_else(|| headers.get(RETRY_AFTER))
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("unknown")
+            .to_string()
+    }
+
+    fn bounded_error_body(body: String) -> String {
+        let mut chars = body.chars();
+        let bounded: String = chars.by_ref().take(MAX_ERROR_BODY_CHARS).collect();
+        if chars.next().is_some() {
+            format!("{bounded}…")
+        } else {
+            bounded
         }
     }
 
@@ -151,10 +217,10 @@ impl GitHubClient {
             format!("{}{}", self.base_url, url)
         };
 
-        let max_retries: u32 = 3;
-        let mut last_error = None;
+        let retry_safe = Self::is_retry_safe(&method);
+        let mut last_error: Option<ContribError> = None;
 
-        for attempt in 1..=max_retries {
+        for attempt in 1..=MAX_REQUEST_ATTEMPTS {
             let mut req = self.client.request(method.clone(), &full_url);
 
             if let Some(p) = params {
@@ -164,35 +230,61 @@ impl GitHubClient {
                 req = req.json(body);
             }
 
-            let response = req
-                .send()
-                .await
-                .map_err(|e| ContribError::GitHub(format!("HTTP error: {}", e)))?;
+            let response = match req.send().await {
+                Ok(response) => response,
+                Err(error) => {
+                    let error = ContribError::GitHub(format!("HTTP error: {error}"));
+                    if retry_safe && attempt < MAX_REQUEST_ATTEMPTS {
+                        let delay = Self::retry_delay(&HeaderMap::new(), attempt);
+                        warn!(
+                            %url,
+                            attempt,
+                            max_attempts = MAX_REQUEST_ATTEMPTS,
+                            delay_ms = delay.as_millis(),
+                            error = %error,
+                            "GitHub transport error, retrying"
+                        );
+                        last_error = Some(error);
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    return Err(error);
+                }
+            };
 
             let status = response.status();
 
             // v5.6: Track rate limit from every response
             self.track_rate_limit(&response);
 
-            // Rate limit check
-            if status == StatusCode::FORBIDDEN {
-                let remaining = response
-                    .headers()
-                    .get("x-ratelimit-remaining")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("?");
-                let reset = response
-                    .headers()
-                    .get("x-ratelimit-reset")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("unknown")
-                    .to_string();
-
-                if remaining == "0" {
-                    return Err(ContribError::RateLimit { reset_at: reset });
+            // Primary and secondary rate limits. GitHub can signal these as either
+            // 403 or 429; secondary limits commonly include Retry-After.
+            if status == StatusCode::TOO_MANY_REQUESTS
+                || (status == StatusCode::FORBIDDEN
+                    && (response.headers().contains_key(RETRY_AFTER)
+                        || response
+                            .headers()
+                            .get("x-ratelimit-remaining")
+                            .is_some_and(|value| value == "0")))
+            {
+                let delay = Self::retry_delay(response.headers(), attempt);
+                let reset_at = Self::rate_limit_reset_description(response.headers());
+                if retry_safe && attempt < MAX_REQUEST_ATTEMPTS && delay <= MAX_RETRY_DELAY {
+                    warn!(
+                        %url,
+                        attempt,
+                        max_attempts = MAX_REQUEST_ATTEMPTS,
+                        delay_ms = delay.as_millis(),
+                        "GitHub rate limited request, retrying"
+                    );
+                    tokio::time::sleep(delay).await;
+                    continue;
                 }
+                return Err(ContribError::RateLimit { reset_at });
+            }
 
-                let body = response.text().await.unwrap_or_default();
+            if status == StatusCode::FORBIDDEN {
+                let body = Self::bounded_error_body(response.text().await.unwrap_or_default());
                 return Err(ContribError::GitHub(format!("Forbidden: {}", body)));
             }
 
@@ -202,30 +294,28 @@ impl GitHubClient {
 
             // Retry on 5xx
             if status.is_server_error() {
-                let body = response.text().await.unwrap_or_default();
-                last_error = Some(ContribError::GitHub(format!(
-                    "GitHub API error {}: {}",
-                    status.as_u16(),
-                    body
-                )));
-                if attempt < max_retries {
-                    let wait = 2u64.pow(attempt);
+                let delay = Self::retry_delay(response.headers(), attempt);
+                let body = Self::bounded_error_body(response.text().await.unwrap_or_default());
+                let error =
+                    ContribError::GitHub(format!("GitHub API error {}: {}", status.as_u16(), body));
+                if retry_safe && attempt < MAX_REQUEST_ATTEMPTS {
                     warn!(
                         status = status.as_u16(),
                         %url,
                         attempt,
-                        max_retries,
-                        "GitHub server error, retrying in {}s",
-                        wait
+                        max_attempts = MAX_REQUEST_ATTEMPTS,
+                        delay_ms = delay.as_millis(),
+                        "GitHub server error, retrying"
                     );
-                    tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                    last_error = Some(error);
+                    tokio::time::sleep(delay.min(MAX_RETRY_DELAY)).await;
                     continue;
                 }
-                return Err(last_error.unwrap());
+                return Err(error);
             }
 
             if status.is_client_error() {
-                let body = response.text().await.unwrap_or_default();
+                let body = Self::bounded_error_body(response.text().await.unwrap_or_default());
                 return Err(ContribError::GitHub(format!(
                     "GitHub API error {}: {}",
                     status.as_u16(),
@@ -242,7 +332,7 @@ impl GitHubClient {
                 .map_err(|e| ContribError::GitHub(format!("JSON parse error: {}", e)));
         }
 
-        Err(last_error.unwrap_or_else(|| ContribError::GitHub("Unknown error".into())))
+        Err(last_error.unwrap_or_else(|| ContribError::GitHub("Request attempts exhausted".into())))
     }
 
     /// Make a raw request returning the Response (for diffs, etc.).
@@ -252,33 +342,72 @@ impl GitHubClient {
         url: &str,
         extra_headers: Option<HeaderMap>,
     ) -> Result<Response> {
+        self.maybe_throttle().await;
+
         let full_url = if url.starts_with("http") {
             url.to_string()
         } else {
             format!("{}{}", self.base_url, url)
         };
+        let retry_safe = Self::is_retry_safe(&method);
+        let mut last_error: Option<ContribError> = None;
 
-        let mut req = self.client.request(method, &full_url);
-        if let Some(h) = extra_headers {
-            req = req.headers(h);
-        }
+        for attempt in 1..=MAX_REQUEST_ATTEMPTS {
+            let mut req = self.client.request(method.clone(), &full_url);
+            if let Some(headers) = &extra_headers {
+                req = req.headers(headers.clone());
+            }
 
-        let response = req
-            .send()
-            .await
-            .map_err(|e| ContribError::GitHub(format!("HTTP error: {}", e)))?;
+            let response = match req.send().await {
+                Ok(response) => response,
+                Err(error) => {
+                    let error = ContribError::GitHub(format!("HTTP error: {error}"));
+                    if retry_safe && attempt < MAX_REQUEST_ATTEMPTS {
+                        let delay = Self::retry_delay(&HeaderMap::new(), attempt);
+                        last_error = Some(error);
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    return Err(error);
+                }
+            };
 
-        if !response.status().is_success() {
+            self.track_rate_limit(&response);
+            if response.status().is_success() {
+                return Ok(response);
+            }
+
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(ContribError::GitHub(format!(
-                "GitHub API error {}: {}",
-                status.as_u16(),
-                body
-            )));
+            let delay = Self::retry_delay(response.headers(), attempt);
+            let is_rate_limited = status == StatusCode::TOO_MANY_REQUESTS
+                || (status == StatusCode::FORBIDDEN
+                    && (response.headers().contains_key(RETRY_AFTER)
+                        || response
+                            .headers()
+                            .get("x-ratelimit-remaining")
+                            .is_some_and(|value| value == "0")));
+
+            if is_rate_limited {
+                let reset_at = Self::rate_limit_reset_description(response.headers());
+                if retry_safe && attempt < MAX_REQUEST_ATTEMPTS && delay <= MAX_RETRY_DELAY {
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                return Err(ContribError::RateLimit { reset_at });
+            }
+
+            let body = Self::bounded_error_body(response.text().await.unwrap_or_default());
+            let error =
+                ContribError::GitHub(format!("GitHub API error {}: {}", status.as_u16(), body));
+            if status.is_server_error() && retry_safe && attempt < MAX_REQUEST_ATTEMPTS {
+                last_error = Some(error);
+                tokio::time::sleep(delay.min(MAX_RETRY_DELAY)).await;
+                continue;
+            }
+            return Err(error);
         }
 
-        Ok(response)
+        Err(last_error.unwrap_or_else(|| ContribError::GitHub("Request attempts exhausted".into())))
     }
 
     async fn get(&self, url: &str) -> Result<Value> {
@@ -559,6 +688,24 @@ impl GitHubClient {
             .await?;
         let sha = ref_data["object"]["sha"].as_str().unwrap_or("").to_string();
 
+        self.create_branch_at_sha(owner, repo, branch_name, &sha)
+            .await
+    }
+
+    /// Create a branch at an exact attested commit rather than a moving branch head.
+    pub async fn create_branch_at_sha(
+        &self,
+        owner: &str,
+        repo: &str,
+        branch_name: &str,
+        sha: &str,
+    ) -> Result<Value> {
+        if sha.trim().is_empty() {
+            return Err(ContribError::GitHub(
+                "cannot create branch at an empty commit SHA".to_string(),
+            ));
+        }
+
         let data = self
             .post(
                 &format!("/repos/{}/{}/git/refs", owner, repo),
@@ -612,7 +759,7 @@ impl GitHubClient {
         .await
     }
 
-    /// Create a pull request.
+    /// Create a draft pull request. Publishing is always left to maintainers.
     pub async fn create_pull_request(
         &self,
         owner: &str,
@@ -638,13 +785,14 @@ impl GitHubClient {
                     "body": body,
                     "head": head,
                     "base": base_branch,
+                    "draft": true,
                 }),
             )
             .await?;
 
         info!(
             pr = data["number"].as_i64().unwrap_or(0),
-            "Created PR on {}/{}: {}", owner, repo, title
+            "Created draft PR on {}/{}: {}", owner, repo, title
         );
         Ok(data)
     }
@@ -1008,21 +1156,9 @@ impl GitHubClient {
             "variables": variables,
         });
 
-        let response = self
-            .client
-            .post("https://api.github.com/graphql")
-            .header("Authorization", format!("Bearer {}", self.token))
-            .header("User-Agent", "contribai-rust/5.1.0")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                crate::core::error::ContribError::GitHub(format!("GraphQL HTTP error: {}", e))
-            })?;
-
-        let data: Value = response.json().await.map_err(|e| {
-            crate::core::error::ContribError::GitHub(format!("GraphQL parse error: {}", e))
-        })?;
+        let data = self
+            .request(reqwest::Method::POST, "/graphql", None, Some(&body))
+            .await?;
 
         if let Some(errors) = data["errors"].as_array() {
             let msg = errors
@@ -1030,10 +1166,7 @@ impl GitHubClient {
                 .filter_map(|e| e["message"].as_str())
                 .collect::<Vec<_>>()
                 .join("; ");
-            return Err(crate::core::error::ContribError::GitHub(format!(
-                "GraphQL errors: {}",
-                msg
-            )));
+            return Err(ContribError::GitHub(format!("GraphQL errors: {}", msg)));
         }
 
         Ok(data["data"].clone())
@@ -1311,6 +1444,37 @@ pub fn parse_repo(data: &Value) -> Repository {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::Arc;
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+    #[derive(Clone)]
+    struct FailThenSucceed {
+        calls: Arc<AtomicUsize>,
+        failures: usize,
+        failure: ResponseTemplate,
+        success: ResponseTemplate,
+    }
+
+    impl Respond for FailThenSucceed {
+        fn respond(&self, _request: &Request) -> ResponseTemplate {
+            let call = self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+            if call < self.failures {
+                self.failure.clone()
+            } else {
+                self.success.clone()
+            }
+        }
+    }
+
+    fn minimal_repo_json() -> Value {
+        serde_json::json!({
+            "owner": { "login": "octocat" },
+            "name": "hello-world",
+            "full_name": "octocat/hello-world"
+        })
+    }
 
     #[test]
     fn test_parse_repo() {
@@ -1351,5 +1515,224 @@ mod tests {
         assert_eq!(repo.stars, 0);
         assert!(!repo.has_license);
         assert_eq!(repo.default_branch, "main");
+    }
+
+    #[test]
+    fn rate_status_uses_configured_buffer() {
+        let client = GitHubClient::new("token", 5_001).expect("client should build");
+        assert!(client.get_rate_status().is_low);
+
+        let client = GitHubClient::new("token", 5_000).expect("client should build");
+        assert!(!client.get_rate_status().is_low);
+    }
+
+    #[test]
+    fn retry_safety_prevents_duplicate_post_side_effects() {
+        assert!(GitHubClient::is_retry_safe(&reqwest::Method::GET));
+        assert!(GitHubClient::is_retry_safe(&reqwest::Method::PUT));
+        assert!(!GitHubClient::is_retry_safe(&reqwest::Method::POST));
+        assert!(!GitHubClient::is_retry_safe(&reqwest::Method::PATCH));
+    }
+
+    #[test]
+    fn error_bodies_are_bounded_without_splitting_unicode() {
+        let body = "🌏".repeat(MAX_ERROR_BODY_CHARS + 10);
+        let bounded = GitHubClient::bounded_error_body(body);
+        assert_eq!(bounded.chars().count(), MAX_ERROR_BODY_CHARS + 1);
+        assert!(bounded.ends_with('…'));
+    }
+
+    #[tokio::test]
+    async fn get_retries_transient_server_errors() {
+        let server = MockServer::start().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("GET"))
+            .and(path("/repos/octocat/hello-world"))
+            .respond_with(FailThenSucceed {
+                calls: calls.clone(),
+                failures: 1,
+                failure: ResponseTemplate::new(503).insert_header("retry-after", "0"),
+                success: ResponseTemplate::new(200).set_body_json(minimal_repo_json()),
+            })
+            .mount(&server)
+            .await;
+
+        let client = GitHubClient::new("token", 100)
+            .expect("client should build")
+            .with_base_url(&server.uri());
+        let repo = client
+            .get_repo_details("octocat", "hello-world")
+            .await
+            .expect("GET should recover from a transient 503");
+
+        assert_eq!(repo.full_name, "octocat/hello-world");
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn get_honors_retry_after_on_rate_limit() {
+        let server = MockServer::start().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("GET"))
+            .and(path("/repos/octocat/hello-world"))
+            .respond_with(FailThenSucceed {
+                calls: calls.clone(),
+                failures: 1,
+                failure: ResponseTemplate::new(429).insert_header("retry-after", "0"),
+                success: ResponseTemplate::new(200).set_body_json(minimal_repo_json()),
+            })
+            .mount(&server)
+            .await;
+
+        let client = GitHubClient::new("token", 100)
+            .expect("client should build")
+            .with_base_url(&server.uri());
+        client
+            .get_repo_details("octocat", "hello-world")
+            .await
+            .expect("GET should recover from a short rate limit");
+
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn post_is_not_retried_after_server_error() {
+        let server = MockServer::start().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("POST"))
+            .and(path("/repos/octocat/hello-world/issues"))
+            .respond_with(FailThenSucceed {
+                calls: calls.clone(),
+                failures: usize::MAX,
+                failure: ResponseTemplate::new(503).insert_header("retry-after", "0"),
+                success: ResponseTemplate::new(200),
+            })
+            .mount(&server)
+            .await;
+
+        let client = GitHubClient::new("token", 100)
+            .expect("client should build")
+            .with_base_url(&server.uri());
+        let result = client
+            .create_issue("octocat", "hello-world", "title", "body")
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn raw_get_retries_and_tracks_rate_limit() {
+        let server = MockServer::start().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("GET"))
+            .and(path("/repos/octocat/hello-world/pulls/7"))
+            .respond_with(FailThenSucceed {
+                calls: calls.clone(),
+                failures: 1,
+                failure: ResponseTemplate::new(503).insert_header("retry-after", "0"),
+                success: ResponseTemplate::new(200)
+                    .insert_header("x-ratelimit-remaining", "42")
+                    .set_body_string("diff --git a/a.rs b/a.rs"),
+            })
+            .mount(&server)
+            .await;
+
+        let client = GitHubClient::new("token", 100)
+            .expect("client should build")
+            .with_base_url(&server.uri());
+        let diff = client
+            .get_pr_diff("octocat", "hello-world", 7)
+            .await
+            .expect("raw GET should recover from a transient 503");
+
+        assert!(diff.starts_with("diff --git"));
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
+        assert_eq!(client.get_rate_status().remaining, 42);
+    }
+
+    #[tokio::test]
+    async fn graphql_uses_configured_endpoint_and_shared_rate_tracking() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("x-ratelimit-remaining", "17")
+                    .set_body_json(serde_json::json!({
+                        "data": { "viewer": { "login": "octocat" } }
+                    })),
+            )
+            .mount(&server)
+            .await;
+
+        let client = GitHubClient::new("token", 100)
+            .expect("client should build")
+            .with_base_url(&server.uri());
+        let data = client
+            .graphql_query("query { viewer { login } }", serde_json::json!({}))
+            .await
+            .expect("GraphQL query should use the configured endpoint");
+
+        assert_eq!(data["viewer"]["login"], "octocat");
+        assert_eq!(client.get_rate_status().remaining, 17);
+    }
+
+    #[tokio::test]
+    async fn admitted_branches_are_bound_to_the_attested_sha() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/repos/octocat/hello-world/git/refs"))
+            .and(body_json(serde_json::json!({
+                "ref": "refs/heads/contribai/fix",
+                "sha": "attested123"
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = GitHubClient::new("token", 100)
+            .expect("client should build")
+            .with_base_url(&server.uri());
+        client
+            .create_branch_at_sha("octocat", "hello-world", "contribai/fix", "attested123")
+            .await
+            .expect("exact-SHA branch should be created");
+    }
+
+    #[tokio::test]
+    async fn pull_requests_are_always_created_as_drafts() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/repos/octocat/hello-world/pulls"))
+            .and(body_json(serde_json::json!({
+                "title": "fix: parser",
+                "body": "evidence",
+                "head": "agent:contribai/fix",
+                "base": "main",
+                "draft": true
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "number": 7
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = GitHubClient::new("token", 100)
+            .expect("client should build")
+            .with_base_url(&server.uri());
+        client
+            .create_pull_request(
+                "octocat",
+                "hello-world",
+                "fix: parser",
+                "evidence",
+                "agent:contribai/fix",
+                Some("main"),
+            )
+            .await
+            .expect("draft PR should be created");
     }
 }

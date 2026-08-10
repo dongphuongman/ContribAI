@@ -3,7 +3,7 @@ version: 2
 updates:
   # Rust dependencies (primary codebase)
   - package-ecosystem: "cargo"
-    directory: "/crates/contribai-rs"
+    directory: "/"
     schedule:
       interval: "weekly"
       day: "monday"

@@ -42,6 +42,17 @@ body:
         - CLI Interface
         - Discovery
         - PR Manager
+        - Admission / Consent
+        - Evidence / Policy
+        - Security / Supply Chain
         - Memory/Storage
         - Documentation
         - Other
+
+  - type: textarea
+    id: externalities
+    attributes:
+      label: Maintainer impact and abuse resistance
+      description: How does this affect upstream review burden, permissions, consent, or misuse risk?
+    validations:
+      required: true

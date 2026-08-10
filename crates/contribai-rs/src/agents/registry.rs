@@ -241,7 +241,7 @@ impl SubAgent for ComplianceAgent {
         AgentRole::Compliance
     }
     fn description(&self) -> &str {
-        "Handle CLA auto-signing, DCO signoff, and post-PR CI monitoring"
+        "Check contribution policy, DCO metadata, evidence, and post-PR CI status"
     }
     async fn execute(&self, _ctx: &AgentContext) -> HashMap<String, Value> {
         let mut result = HashMap::new();

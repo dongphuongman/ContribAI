@@ -1,4 +1,4 @@
-//! ContribAI — AI agent that autonomously contributes to open source.
+//! ContribAI — maintainer-governed admission and evidence for AI contributions.
 //!
 //! # Architecture
 //!

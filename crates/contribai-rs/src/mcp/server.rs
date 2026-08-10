@@ -21,7 +21,6 @@
 //! - cleanup_forks
 //! - add_pr_review_comment
 //! - dismiss_review
-//! - sign_cla
 //! - get_pr_reviews
 //! - get_pr_comments
 //! - get_authenticated_user
@@ -34,6 +33,22 @@ use tracing::{error, info};
 
 use crate::github::client::GitHubClient;
 use crate::orchestrator::memory::Memory;
+
+const MUTATING_TOOLS: &[&str] = &[
+    "fork_repo",
+    "create_branch",
+    "push_file_change",
+    "create_pr",
+    "close_pr",
+    "cleanup_forks",
+    "add_pr_review_comment",
+    "dismiss_review",
+];
+const NON_DELEGABLE_TOOLS: &[&str] = &["create_pr"];
+
+fn is_mutating_tool(name: &str) -> bool {
+    MUTATING_TOOLS.contains(&name)
+}
 
 /// JSON-RPC request.
 #[derive(Debug, Deserialize)]
@@ -90,8 +105,8 @@ struct ToolDef {
 }
 
 /// Get all tool definitions.
-fn tool_definitions() -> Vec<ToolDef> {
-    vec![
+fn tool_definitions(allow_writes: bool) -> Vec<ToolDef> {
+    let tools = vec![
         ToolDef {
             name: "search_repos".into(),
             description: "Search GitHub for open-source repositories by language and star range"
@@ -204,22 +219,6 @@ fn tool_definitions() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
-            name: "create_pr".into(),
-            description: "Create a pull request from a fork branch to the upstream repo".into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "owner": {"type": "string"},
-                    "repo": {"type": "string"},
-                    "title": {"type": "string"},
-                    "body": {"type": "string"},
-                    "head_branch": {"type": "string", "description": "fork_owner:branch"},
-                    "base_branch": {"type": "string", "description": "Target branch (defaults to default branch)"}
-                },
-                "required": ["owner", "repo", "title", "body", "head_branch"]
-            }),
-        },
-        ToolDef {
             name: "close_pr".into(),
             description: "Close a pull request".into(),
             input_schema: json!({
@@ -318,18 +317,6 @@ fn tool_definitions() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
-            name: "sign_cla".into(),
-            description: "Sign the Contributor License Agreement (CLA) for a repository".into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "owner": {"type": "string"},
-                    "repo": {"type": "string"}
-                },
-                "required": ["owner", "repo"]
-            }),
-        },
-        ToolDef {
             name: "get_pr_reviews".into(),
             description: "Get reviews submitted on a pull request".into(),
             input_schema: json!({
@@ -363,16 +350,39 @@ fn tool_definitions() -> Vec<ToolDef> {
                 "properties": {}
             }),
         },
-    ]
+    ];
+
+    tools
+        .into_iter()
+        .filter(|tool| !NON_DELEGABLE_TOOLS.contains(&tool.name.as_str()))
+        .filter(|tool| allow_writes || !is_mutating_tool(&tool.name))
+        .collect()
+}
+
+/// Names advertised for a given capability mode.
+pub fn advertised_tool_names(allow_writes: bool) -> Vec<String> {
+    tool_definitions(allow_writes)
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect()
 }
 
 /// Run the MCP server on stdio (JSON-RPC over stdin/stdout).
 pub async fn run_stdio_server(github: &GitHubClient, memory: &Memory) -> anyhow::Result<()> {
+    run_stdio_server_with_capabilities(github, memory, false).await
+}
+
+/// Run MCP with an explicit capability grant. The default entry point is read-only.
+pub async fn run_stdio_server_with_capabilities(
+    github: &GitHubClient,
+    memory: &Memory,
+    allow_writes: bool,
+) -> anyhow::Result<()> {
     let reader = BufReader::new(tokio::io::stdin());
     let mut lines = reader.lines();
     let stdout = io::stdout();
 
-    info!("MCP server started on stdio");
+    info!(allow_writes, "MCP server started on stdio");
 
     while let Ok(Some(line)) = lines.next_line().await {
         if line.is_empty() {
@@ -405,7 +415,7 @@ pub async fn run_stdio_server(github: &GitHubClient, memory: &Memory) -> anyhow:
             ),
 
             "tools/list" => {
-                let tools = tool_definitions();
+                let tools = tool_definitions(allow_writes);
                 JsonRpcResponse::success(id, json!({ "tools": tools }))
             }
 
@@ -421,7 +431,7 @@ pub async fn run_stdio_server(github: &GitHubClient, memory: &Memory) -> anyhow:
                     .cloned()
                     .unwrap_or(json!({}));
 
-                match handle_tool_call(tool_name, &arguments, github, memory).await {
+                match handle_tool_call(tool_name, &arguments, github, memory, allow_writes).await {
                     Ok(result) => JsonRpcResponse::success(
                         id,
                         json!({
@@ -470,7 +480,18 @@ async fn handle_tool_call(
     args: &Value,
     github: &GitHubClient,
     memory: &Memory,
+    allow_writes: bool,
 ) -> anyhow::Result<Value> {
+    if NON_DELEGABLE_TOOLS.contains(&name) {
+        anyhow::bail!(
+            "tool '{name}' is not delegable; draft PRs must use the admission-gated pipeline"
+        );
+    }
+    if is_mutating_tool(name) && !allow_writes {
+        anyhow::bail!(
+            "tool '{name}' is unavailable: MCP is read-only; restart with an explicit write grant"
+        );
+    }
     // Helper: extract a required non-empty string argument.
     let require_str = |key: &str| -> anyhow::Result<&str> {
         args[key]
@@ -560,20 +581,6 @@ async fn handle_tool_call(
                 )
                 .await?;
             Ok(json!({"status": "pushed", "path": path}))
-        }
-
-        "create_pr" => {
-            let owner = require_str("owner")?;
-            let repo = require_str("repo")?;
-            let title = args["title"].as_str().unwrap_or("");
-            let body = args["body"].as_str().unwrap_or("");
-            let head = args["head_branch"].as_str().unwrap_or("");
-            let base = args["base_branch"].as_str();
-
-            let pr = github
-                .create_pull_request(owner, repo, title, body, head, base)
-                .await?;
-            Ok(json!(pr))
         }
 
         "get_stats" => {
@@ -828,11 +835,6 @@ async fn handle_tool_call(
             Ok(json!(result))
         }
 
-        "sign_cla" => {
-            // CLA signing is handled automatically by patrol mode
-            Ok(json!({"message": "CLA signing is handled automatically by patrol mode"}))
-        }
-
         "get_pr_reviews" => {
             let owner = require_str("owner")?;
             let repo = require_str("repo")?;
@@ -865,14 +867,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_tool_definitions_complete() {
-        let tools = tool_definitions();
-        // Must have all 21 tools registered
-        assert_eq!(tools.len(), 21, "Expected 21 tools, got {}", tools.len());
-
-        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-
-        // Original 10 tools
+    fn read_only_tools_exclude_every_mutation() {
+        let tools = tool_definitions(false);
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
+        assert_eq!(tools.len(), 12);
+        assert!(MUTATING_TOOLS.iter().all(|name| !names.contains(name)));
         assert!(names.contains(&"search_repos"), "missing search_repos");
         assert!(names.contains(&"get_repo_info"), "missing get_repo_info");
         assert!(names.contains(&"get_file_tree"), "missing get_file_tree");
@@ -884,17 +883,7 @@ mod tests {
             names.contains(&"get_open_issues"),
             "missing get_open_issues"
         );
-        assert!(names.contains(&"fork_repo"), "missing fork_repo");
-        assert!(names.contains(&"create_branch"), "missing create_branch");
-        assert!(
-            names.contains(&"push_file_change"),
-            "missing push_file_change"
-        );
-        assert!(names.contains(&"create_pr"), "missing create_pr");
         assert!(names.contains(&"get_stats"), "missing get_stats");
-
-        // 5 previously added tools
-        assert!(names.contains(&"close_pr"), "missing close_pr");
         assert!(
             names.contains(&"check_duplicate_pr"),
             "missing check_duplicate_pr"
@@ -904,15 +893,6 @@ mod tests {
             "missing check_ai_policy"
         );
         assert!(names.contains(&"patrol_prs"), "missing patrol_prs");
-        assert!(names.contains(&"cleanup_forks"), "missing cleanup_forks");
-
-        // 6 newly added tools
-        assert!(
-            names.contains(&"add_pr_review_comment"),
-            "missing add_pr_review_comment"
-        );
-        assert!(names.contains(&"dismiss_review"), "missing dismiss_review");
-        assert!(names.contains(&"sign_cla"), "missing sign_cla");
         assert!(names.contains(&"get_pr_reviews"), "missing get_pr_reviews");
         assert!(
             names.contains(&"get_pr_comments"),
@@ -922,6 +902,14 @@ mod tests {
             names.contains(&"get_authenticated_user"),
             "missing get_authenticated_user"
         );
+    }
+
+    #[test]
+    fn explicit_write_mode_never_delegates_pr_creation_or_cla_signing() {
+        let names = advertised_tool_names(true);
+        assert_eq!(names.len(), 19);
+        assert!(!names.contains(&"create_pr".to_string()));
+        assert!(!names.contains(&"sign_cla".to_string()));
     }
 
     #[test]

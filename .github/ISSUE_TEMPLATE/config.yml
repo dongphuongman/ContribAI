@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Private security report
+    url: https://github.com/tang-vu/ContribAI/security/advisories/new
+    about: Report vulnerabilities privately; do not open a public issue.
+  - name: Design discussion
+    url: https://github.com/tang-vu/ContribAI/discussions
+    about: Discuss broad product direction before proposing a large change.

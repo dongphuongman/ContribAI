@@ -42,10 +42,17 @@ body:
       placeholder: "0.1.0"
 
   - type: input
-    id: python
+    id: rust
     attributes:
-      label: Python Version
-      placeholder: "3.12.1"
+      label: Rust Version
+      description: Output of `rustc --version`
+      placeholder: "rustc 1.x.y"
+
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety impact
+      description: Did this cause or risk an unintended GitHub write, credential leak, consent bypass, or public exposure?
 
   - type: dropdown
     id: os

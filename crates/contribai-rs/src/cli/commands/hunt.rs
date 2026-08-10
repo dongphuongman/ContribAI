@@ -1,4 +1,4 @@
-//! Handles `Commands::Hunt` — aggressive multi-round discovery mode.
+//! Handles `Commands::Hunt` — multi-round evidence discovery.
 
 use colored::Colorize;
 
@@ -13,11 +13,14 @@ pub async fn run_hunt(
     delay: u32,
     language: Option<String>,
     dry_run: bool,
+    submit: bool,
     approve: bool,
 ) -> anyhow::Result<()> {
     print_banner();
-    let config = load_config(config_path)?;
-    print_config_summary(&config, dry_run);
+    let mut config = load_config(config_path)?;
+    let effective_dry_run = dry_run || !submit;
+    config.pipeline.agent_mode = if submit { "build" } else { "plan" }.to_string();
+    print_config_summary(&config, effective_dry_run);
 
     println!(
         "   {}: {} rounds",
@@ -57,9 +60,12 @@ pub async fn run_hunt(
         &event_bus,
     );
     pipeline.set_approve_high_risk(approve);
+    pipeline.enable_external_writes(submit);
 
-    let total = pipeline.hunt(rounds, delay as u64, dry_run, "both").await?;
+    let total = pipeline
+        .hunt(rounds, delay as u64, effective_dry_run, "both")
+        .await?;
 
-    print_result(&total, dry_run);
+    print_result(&total, effective_dry_run);
     Ok(())
 }

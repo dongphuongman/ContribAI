@@ -1,11 +1,16 @@
 provenance: "0.1"
 name: "ContribAI"
-description: "Autonomous AI agent that discovers, analyzes, and submits Pull Requests to open source GitHub projects."
+description: "Maintainer-governed agent for evidence-backed open source contribution proposals."
 capabilities:
   - read:code
-  - write:code
+  - propose:code
   - api:github
 constraints:
+  - external_write:explicit_operator_intent
+  - external_write:repository_consent
+  - external_write:human_review
+  - pull_request:draft_only
+  - cla:no_automated_signing
   - no:pii
   - no:financial:transact
   - no:destructive:delete

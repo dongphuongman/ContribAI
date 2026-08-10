@@ -4,9 +4,15 @@ use colored::Colorize;
 
 use crate::cli::{create_github, create_llm, create_memory, load_config, print_banner};
 
-pub async fn run_watchlist(config_path: Option<&str>, dry_run: bool) -> anyhow::Result<()> {
+pub async fn run_watchlist(
+    config_path: Option<&str>,
+    dry_run: bool,
+    submit: bool,
+) -> anyhow::Result<()> {
     print_banner();
-    let config = load_config(config_path)?;
+    let mut config = load_config(config_path)?;
+    let effective_dry_run = dry_run || !submit;
+    config.pipeline.agent_mode = if submit { "build" } else { "plan" }.to_string();
 
     let watchlist = &config.discovery.watchlist;
     if watchlist.is_empty() {
@@ -25,7 +31,7 @@ pub async fn run_watchlist(config_path: Option<&str>, dry_run: bool) -> anyhow::
     println!(
         "📋 Watchlist sweep: {} repo(s) {}",
         watchlist.len().to_string().cyan().bold(),
-        if dry_run {
+        if effective_dry_run {
             "(DRY RUN)".yellow().to_string()
         } else {
             "(LIVE)".green().to_string()
@@ -38,13 +44,14 @@ pub async fn run_watchlist(config_path: Option<&str>, dry_run: bool) -> anyhow::
     let memory = create_memory(&config)?;
     let event_bus = contribai::core::events::EventBus::default();
 
-    let pipeline = contribai::orchestrator::pipeline::ContribPipeline::new(
+    let mut pipeline = contribai::orchestrator::pipeline::ContribPipeline::new(
         &config,
         &github,
         llm.as_ref(),
         &memory,
         &event_bus,
     );
+    pipeline.enable_external_writes(submit);
 
     let mut total_findings = 0usize;
     let mut total_prs = 0usize;
@@ -68,7 +75,7 @@ pub async fn run_watchlist(config_path: Option<&str>, dry_run: bool) -> anyhow::
             repo_ref.bold()
         );
 
-        match pipeline.run_targeted(owner, name, dry_run).await {
+        match pipeline.run_targeted(owner, name, effective_dry_run).await {
             Ok(result) => {
                 total_findings += result.findings_total;
                 total_prs += result.prs_created;

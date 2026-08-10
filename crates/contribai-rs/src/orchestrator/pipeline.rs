@@ -10,6 +10,10 @@ use tracing::{debug, info, warn};
 
 use crate::analysis::analyzer::CodeAnalyzer;
 use crate::analysis::compressor::ContextCompressor;
+use crate::core::admission::{
+    discover_repository_consent, AdmissionController, ContributionPermit, EvidenceCapsule,
+    EvidenceCheck, RepositoryConsent,
+};
 use crate::core::config::ContribAIConfig;
 use crate::core::error::Result;
 use crate::core::events::{Event, EventBus, EventType};
@@ -18,6 +22,7 @@ use crate::core::models::{
     AnalysisResult, Contribution, ContributionType, DiscoveryCriteria, FileChange, Finding,
     Repository,
 };
+use crate::core::permissions::PermissionAction;
 use crate::generator::engine::ContributionGenerator;
 use crate::generator::risk::{classify_risk, is_within_tolerance};
 use crate::generator::scorer::QualityScorer;
@@ -29,6 +34,7 @@ use crate::llm::provider::LlmProvider;
 use crate::llm::router::{CostStrategy, TaskRouter};
 use crate::orchestrator::circuit_breaker::CircuitBreaker;
 use crate::orchestrator::memory::Memory;
+use crate::orchestrator::review_gate::HumanReviewer;
 use crate::pr::manager::PrManager;
 
 /// Files that should NEVER be modified by ContribAI.
@@ -85,6 +91,7 @@ pub struct PipelineResult {
     pub findings_total: usize,
     pub contributions_generated: usize,
     pub prs_created: usize,
+    pub submissions_blocked: usize,
     pub errors: Vec<String>,
 }
 
@@ -102,6 +109,8 @@ pub struct ContribPipeline<'a> {
     circuit_breaker: CircuitBreaker,
     /// Allow HIGH risk changes to auto-submit (set via --approve flag).
     approve_high_risk: bool,
+    /// External writes are capability-gated and disabled unless the caller opts in.
+    external_writes_enabled: bool,
 }
 
 /// Merge multiple contributions into a single multi-file contribution.
@@ -224,6 +233,7 @@ impl<'a> ContribPipeline<'a> {
             router: std::sync::Mutex::new(router),
             circuit_breaker,
             approve_high_risk: false,
+            external_writes_enabled: false,
         }
     }
 
@@ -242,6 +252,119 @@ impl<'a> ContribPipeline<'a> {
     /// Set whether HIGH risk changes should be auto-submitted.
     pub fn set_approve_high_risk(&mut self, approve: bool) {
         self.approve_high_risk = approve;
+    }
+
+    /// Enable the write capability for this pipeline instance. Repository-side
+    /// consent and contribution admission are still mandatory.
+    pub fn enable_external_writes(&mut self, enabled: bool) {
+        self.external_writes_enabled = enabled;
+    }
+
+    async fn base_revision(&self, repo: &Repository) -> Option<String> {
+        self.github
+            .get_branch_info(&repo.owner, &repo.name, &repo.default_branch)
+            .await
+            .ok()
+            .and_then(|branch| branch["commit"]["sha"].as_str().map(str::to_string))
+            .filter(|sha| !sha.is_empty())
+    }
+
+    async fn admit_contribution(
+        &self,
+        repo: &Repository,
+        contribution: &Contribution,
+        consent: Option<RepositoryConsent>,
+        issue: Option<i64>,
+        checks: Vec<EvidenceCheck>,
+    ) -> Option<EvidenceCapsule> {
+        if !self.external_writes_enabled {
+            warn!(
+                repo = %repo.full_name,
+                "Submission blocked: external write capability was not explicitly enabled"
+            );
+            return None;
+        }
+        if self
+            .config
+            .pipeline
+            .permissions
+            .pr_create
+            .evaluate(&repo.full_name)
+            == PermissionAction::Deny
+        {
+            warn!(repo = %repo.full_name, "Submission blocked by pr_create permission policy");
+            return None;
+        }
+
+        let Some(consent) = consent else {
+            warn!(
+                repo = %repo.full_name,
+                "Submission blocked: no repository opt-in or maintainer approval label"
+            );
+            return None;
+        };
+        let Some(base_sha) = self.base_revision(repo).await else {
+            warn!(
+                repo = %repo.full_name,
+                branch = %repo.default_branch,
+                "Submission blocked: base revision could not be attested"
+            );
+            return None;
+        };
+
+        let permit = ContributionPermit::issue(repo, base_sha, consent, issue);
+        let report = AdmissionController::evaluate(repo, contribution, &permit, chrono::Utc::now());
+        let failed_checks: Vec<&str> = checks
+            .iter()
+            .filter(|check| !check.passed)
+            .map(|check| check.name.as_str())
+            .collect();
+        if !failed_checks.is_empty() {
+            warn!(
+                repo = %repo.full_name,
+                permit = %permit.id,
+                failed_checks = ?failed_checks,
+                "Submission blocked by failed evidence checks"
+            );
+            return None;
+        }
+        let evidence = EvidenceCapsule::build(contribution, &permit, &report, checks);
+        if !report.allowed {
+            warn!(
+                repo = %repo.full_name,
+                permit = %permit.id,
+                violations = ?report.violations,
+                "Submission blocked by contribution admission policy"
+            );
+            return None;
+        }
+
+        // External publication always requires an interactive human decision. There is
+        // intentionally no pipeline API for pre-approving this gate.
+        let reviewer = HumanReviewer::new(false);
+        match reviewer
+            .review_with_evidence(
+                contribution,
+                &contribution.finding,
+                &repo.full_name,
+                &evidence,
+            )
+            .await
+        {
+            Ok(decision) if decision.is_approved() => Some(evidence),
+            Ok(decision) => {
+                info!(
+                    repo = %repo.full_name,
+                    action = ?decision.action,
+                    "Submission stopped at human review gate"
+                );
+                None
+            }
+            Err(error) => {
+                warn!(repo = %repo.full_name, %error, "Human review gate failed closed");
+                None
+            }
+        }
     }
 
     /// Get the current circuit breaker state summary.
@@ -334,7 +457,45 @@ impl<'a> ContribPipeline<'a> {
         Ok(result)
     }
 
-    /// Run the full pipeline: discover → analyze → generate → PR.
+    /// Solve maintainer-approved issues in one repository through the same
+    /// admission, evidence, and review gates as the discovery pipeline.
+    pub async fn solve_targeted(
+        &self,
+        owner: &str,
+        name: &str,
+        dry_run: bool,
+        max_prs: usize,
+    ) -> Result<PipelineResult> {
+        let run_id = self.memory.start_run()?;
+        let full_name = format!("{owner}/{name}");
+        let repo = self.github.get_repo_details(owner, name).await?;
+        let user_info = self.github.get_authenticated_user().await.ok();
+        let mut ctx = PipelineContext {
+            repo_name: full_name,
+            owner: owner.to_string(),
+            dry_run,
+            remaining_prs: max_prs as i32,
+            ..Default::default()
+        };
+        if let Some(user) = user_info {
+            ctx.metadata.insert("user".to_string(), user);
+        }
+        let ctx = self.middleware_chain.execute(ctx).await?;
+        let result = self
+            .process_repo_issues(&repo, dry_run, max_prs, &ctx)
+            .await?;
+
+        self.memory.finish_run(
+            run_id,
+            result.repos_analyzed as i64,
+            result.prs_created as i64,
+            result.findings_total as i64,
+            result.errors.len() as i64,
+        )?;
+        Ok(result)
+    }
+
+    /// Run the full pipeline: discover, analyze, generate, and optionally propose.
     pub async fn run(
         &self,
         criteria: Option<&DiscoveryCriteria>,
@@ -450,6 +611,7 @@ impl<'a> ContribPipeline<'a> {
                     result.findings_total += repo_result.findings_total;
                     result.contributions_generated += repo_result.contributions_generated;
                     result.prs_created += repo_result.prs_created;
+                    result.submissions_blocked += repo_result.submissions_blocked;
                     result.errors.extend(repo_result.errors.clone());
 
                     // Record circuit breaker success/failure
@@ -492,7 +654,7 @@ impl<'a> ContribPipeline<'a> {
         Ok(result)
     }
 
-    /// Hunt mode: aggressively discover and contribute across multiple rounds.
+    /// Multi-round discovery with the same admission controls as targeted runs.
     pub async fn hunt(
         &self,
         rounds: u32,
@@ -675,6 +837,7 @@ impl<'a> ContribPipeline<'a> {
                 total.findings_total += rr.findings_total;
                 total.contributions_generated += rr.contributions_generated;
                 total.prs_created += rr.prs_created;
+                total.submissions_blocked += rr.submissions_blocked;
                 total.errors.extend(rr.errors);
                 remaining = remaining.saturating_sub(rr.prs_created);
 
@@ -698,6 +861,7 @@ impl<'a> ContribPipeline<'a> {
                         total.findings_total += ir.findings_total;
                         total.contributions_generated += ir.contributions_generated;
                         total.prs_created += ir.prs_created;
+                        total.submissions_blocked += ir.submissions_blocked;
                         total.errors.extend(ir.errors);
                     }
                     Err(e) => debug!("Issue-first hunt failed: {}", e),
@@ -787,6 +951,7 @@ impl<'a> ContribPipeline<'a> {
                     rr.findings_total += r.findings_total;
                     rr.contributions_generated += r.contributions_generated;
                     rr.prs_created += r.prs_created;
+                    rr.submissions_blocked += r.submissions_blocked;
                     rr.errors.extend(r.errors.clone());
                     // Record circuit breaker
                     if r.errors.is_empty() {
@@ -812,6 +977,7 @@ impl<'a> ContribPipeline<'a> {
                     rr.findings_total += r.findings_total;
                     rr.contributions_generated += r.contributions_generated;
                     rr.prs_created += r.prs_created;
+                    rr.submissions_blocked += r.submissions_blocked;
                     rr.errors.extend(r.errors);
                 }
                 Err(e) => rr.errors.push(format!("{} issues: {}", repo.full_name, e)),
@@ -901,6 +1067,7 @@ impl<'a> ContribPipeline<'a> {
                             result.findings_total += rr.findings_total;
                             result.contributions_generated += rr.contributions_generated;
                             result.prs_created += rr.prs_created;
+                            result.submissions_blocked += rr.submissions_blocked;
                             result.errors.extend(rr.errors);
 
                             if result.prs_created >= max_issues {
@@ -978,6 +1145,17 @@ impl<'a> ContribPipeline<'a> {
                 "⛔ Repo guidelines ban AI contributions — skipping"
             );
             return Ok(PipelineResult::default());
+        }
+
+        let repository_consent =
+            discover_repository_consent(self.github, &repo.owner, &repo.name).await;
+        if repository_consent.is_some() {
+            info!(repo = %repo.full_name, "Maintainer opt-in manifest verified");
+        } else if !dry_run {
+            warn!(
+                repo = %repo.full_name,
+                "No maintainer opt-in found; analysis may continue but submission will be blocked"
+            );
         }
 
         let guidelines = Some(guidelines);
@@ -1383,8 +1561,50 @@ impl<'a> ContribPipeline<'a> {
                 "🏃 [DRY RUN] Would create multi-file PR"
             );
         } else {
+            let risk = classify_risk(
+                &merged.contribution_type.to_string(),
+                &merged
+                    .changes
+                    .iter()
+                    .map(|change| change.path.clone())
+                    .collect::<Vec<_>>(),
+                merged
+                    .changes
+                    .iter()
+                    .map(|change| change.new_content.lines().count())
+                    .sum(),
+            );
+            let checks = vec![
+                EvidenceCheck {
+                    name: "quality_gate".to_string(),
+                    passed: true,
+                    details: "all generated changes passed the configured quality threshold"
+                        .to_string(),
+                },
+                EvidenceCheck {
+                    name: "risk_gate".to_string(),
+                    passed: is_within_tolerance(risk.level, &self.config.pipeline.risk_tolerance)
+                        || self.approve_high_risk,
+                    details: format!("{}: {}", risk.level, risk.reason),
+                },
+                EvidenceCheck {
+                    name: "finding_verification".to_string(),
+                    passed: true,
+                    details: "finding passed the configured verification gate".to_string(),
+                },
+            ];
+            let Some(evidence) = self
+                .admit_contribution(repo, &merged, repository_consent, None, checks)
+                .await
+            else {
+                result.submissions_blocked += 1;
+                return Ok(result);
+            };
             let mut pr_mgr = PrManager::new(self.github);
-            match pr_mgr.create_pr(&merged, repo).await {
+            match pr_mgr
+                .create_pr_with_evidence(&merged, repo, &evidence)
+                .await
+            {
                 Ok(pr_result) => {
                     result.prs_created += 1;
 
@@ -1452,6 +1672,19 @@ impl<'a> ContribPipeline<'a> {
         _ctx: &PipelineContext,
     ) -> Result<PipelineResult> {
         use crate::issues::solver::IssueSolver;
+
+        use crate::github::guidelines::{detects_ai_ban, has_contribai_block};
+
+        let guidelines = fetch_repo_guidelines(self.github, &repo.owner, &repo.name).await;
+        if has_contribai_block(self.github, &repo.owner, &repo.name).await
+            || (!guidelines.contributing_md.is_empty()
+                && detects_ai_ban(&guidelines.contributing_md))
+        {
+            info!(repo = %repo.full_name, "Issue solver blocked by repository AI policy");
+            return Ok(PipelineResult::default());
+        }
+        let repository_consent =
+            discover_repository_consent(self.github, &repo.owner, &repo.name).await;
 
         let solver = IssueSolver::new(self.llm, self.github);
         let issues = solver.fetch_solvable_issues(repo, max_prs, 5).await;
@@ -1558,8 +1791,33 @@ impl<'a> ContribPipeline<'a> {
                 continue;
             }
 
+            let consent =
+                RepositoryConsent::from_issue(issue).or_else(|| repository_consent.clone());
+            let checks = vec![
+                EvidenceCheck {
+                    name: "issue_linkage".to_string(),
+                    passed: true,
+                    details: format!("change is scoped to issue #{}", issue.number),
+                },
+                EvidenceCheck {
+                    name: "generation_validation".to_string(),
+                    passed: true,
+                    details: "generated changes passed structural validation".to_string(),
+                },
+            ];
+            let Some(evidence) = self
+                .admit_contribution(repo, &merged, consent, Some(issue.number), checks)
+                .await
+            else {
+                result.submissions_blocked += 1;
+                continue;
+            };
+
             let mut pr_mgr = PrManager::new(self.github);
-            match pr_mgr.create_pr(&merged, repo).await {
+            match pr_mgr
+                .create_pr_with_evidence(&merged, repo, &evidence)
+                .await
+            {
                 Ok(pr_result) => {
                     result.prs_created += 1;
 

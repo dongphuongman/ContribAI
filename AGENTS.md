@@ -1,248 +1,129 @@
-# AI Agent Guide for ContribAI
+# Agent Guide for ContribAI
 
-> This document is designed for AI assistants (GitHub Copilot, Claude, Cursor, Coderabbit, etc.)
-> scanning this repository. It provides structured context to help AI understand the codebase.
+This file is operational guidance for human and AI contributors working **inside this repository**.
+It is not the outbound policy applied to third-party repositories.
 
-## What This Project Is
+## Product contract
 
-ContribAI is an **autonomous AI agent** that contributes to open source projects on GitHub.
-It discovers repos, analyzes code, generates fixes, and submits pull requests — all without human intervention.
+ContribAI is a maintainer-governed admission and evidence layer for AI-assisted open source
+contributions. It may discover and analyze public repositories, but public visibility is not
+permission to submit work.
 
-**It is NOT** a library/SDK, web app, or CLI tool intended for end-user consumption.
-It is itself an AI agent that operates on other GitHub repositories.
+The primary implementation is Rust 2021 under `crates/contribai-rs/`. The code under `python/` is
+legacy reference code and should not receive new features.
 
-> **v6.8.0 — Primary implementation is Rust** (`crates/contribai-rs/`).
-> Python code is in `python/` (legacy v4.1.0, kept for reference).
+Every product change must preserve these invariants:
 
-## Tech Stack
+1. External writes are disabled by default.
+2. Submission requires an explicit local capability grant (`--submit` or equivalent).
+3. An upstream repository manifest or maintainer-controlled issue label must authorize scope.
+4. The permit is time-bounded and bound to the repository and an exact base commit SHA.
+5. Protected governance and automation paths cannot be changed by generated proposals.
+6. Failed or missing checks fail closed.
+7. A human reviews the exact candidate and evidence before submission.
+8. Pull requests are drafts; ContribAI never merges or signs a CLA.
+9. MCP is read-only by default and never exposes PR creation or legal attestation.
+10. Product language must not encourage bulk unsolicited activity, contribution farming, or
+    shifting verification cost to maintainers.
 
-| Layer | Technology |
-|-------|-----------|
-| Language | **Rust 2021** (primary), Python 3.11+ (legacy `python/`) |
-| Async | tokio (full), async/await throughout |
-| HTTP | reqwest 0.12 (async, rustls) |
-| Database | SQLite (rusqlite, bundled) |
-| LLM | Google Gemini 3.x (primary), OpenAI, Anthropic, Ollama, Vertex AI |
-| GitHub | REST API v3 + GraphQL (via reqwest) |
-| Web | axum 0.7 + tower-http |
-| TUI | ratatui + crossterm |
-| CLI | clap v4 (derive) + dialoguer + colored |
-| AST | tree-sitter (13 languages: Python, JS, TS, Go, Rust, Java, C, C++, Ruby, PHP, C#, HTML, CSS) |
-| Tests | 602 tests (mockall, wiremock, tokio-test) |
-| Lint | clippy + ruff (Python legacy) |
+If a requested change conflicts with an invariant, stop and explain the conflict instead of
+silently weakening the guardrail.
 
-## Project Structure
+## Repository map
 
-```
-ContribAI/
-├── crates/contribai-rs/        ← PRIMARY: Rust v6.8.0
-│   ├── src/
-│   │   ├── main.rs             entry point
-│   │   ├── lib.rs              library root
-│   │   ├── cli/
-│   │   │   ├── mod.rs          40+ commands + interactive menu
-│   │   │   ├── tui.rs          ratatui TUI (interactive command)
-│   │   │   ├── wizard.rs       setup wizard
-│   │   │   └── config_editor.rs get/set/list config
-│   │   ├── core/
-│   │   │   ├── config.rs       ContribAIConfig (serde_yaml)
-│   │   │   └── events.rs       18 typed events + JSONL log
-│   │   ├── github/
-│   │   │   ├── client.rs       REST + GraphQL client
-│   │   │   └── discovery.rs    repo search
-│   │   ├── analysis/
-│   │   │   ├── analyzer.rs     7 analyzers (22 file extensions)
-│   │   │   ├── ast_intel.rs    tree-sitter AST (13 languages)
-│   │   │   ├── skills.rs       27 progressive skills
-│   │   │   └── context_compressor.rs
-│   │   ├── generator/
-│   │   │   ├── engine.rs       code generation
-│   │   │   └── scorer.rs       quality scoring
-│   │   ├── llm/
-│   │   │   ├── provider.rs     multi-provider LLM
-│   │   │   └── agents.rs       sub-agent registry
-│   │   ├── orchestrator/
-│   │   │   ├── pipeline.rs     main pipeline
-│   │   │   └── memory.rs       SQLite + working memory (72h TTL)
-│   │   ├── pr/
-│   │   │   ├── manager.rs      PR lifecycle
-│   │   │   └── patrol.rs       review monitor
-│   │   ├── issues/solver.rs    issue solving
-│   │   ├── mcp/
-│   │   │   ├── server.rs       21 MCP tools (stdio)
-│   │   │   └── client.rs       MCP client
-│   │   ├── web/mod.rs          axum dashboard API
-│   │   ├── sandbox/sandbox.rs  Docker + ast fallback
-│   │   └── tools/protocol.rs  tool interface
-│   ├── Cargo.toml              v6.8.0
-│   └── tests/                 418 Rust tests
-│
-├── python/                     LEGACY Python v4.1.0
-│   ├── contribai/              Python package (importable as 'contribai')
-│   └── tests/                 Python pytest tests
-│
-├── Cargo.toml                  workspace root (cargo build from here)
-├── pyproject.toml              Python legacy package config
-└── config.yaml.template        shared config template
+```text
+crates/contribai-rs/src/
+├── core/admission.rs        consent, permits, scope policy, evidence
+├── core/config.rs           typed YAML configuration and safe defaults
+├── orchestrator/pipeline.rs discovery-to-admission orchestration
+├── orchestrator/review_gate.rs interactive approval
+├── github/client.rs         resilient REST and GraphQL client
+├── analysis/                AST, triage, repository context, skills
+├── generator/               generation, validation, risk, scoring
+├── pr/                      evidence-required drafts and patrol
+├── mcp/                     capability-aware MCP client/server
+├── web/                     dashboard and authenticated API
+└── cli/                     clap commands, wizard, and TUI
 ```
 
-## Architecture (v6.8.0)
+Top-level policy and operator documents are part of the product. Update them when behavior or
+defaults change:
 
-### Core Pipeline
-```
-CLI → Pipeline → Middleware Chain → Analysis → Generation → PR → CI Monitor
-```
+- `README.md`
+- `CONTRIBUTING.md`
+- `SECURITY.md`
+- `GOVERNANCE.md`
+- `docs/CONSENT_PROTOCOL.md`
+- `docs/THREAT_MODEL.md`
+- `config.example.yaml` and `config.yaml.template`
 
-### Key Patterns
-1. **CLI (40+ commands)** — clap derive + dialoguer menu (`cli/mod.rs`)
-2. **Interactive TUI** — ratatui 4-tab UI: Dashboard/PRs/Repos/Actions (`cli/tui.rs`)
-3. **Middleware Chain** — 5 ordered middlewares (`orchestrator/pipeline.rs`)
-4. **Progressive Skills** — 27 analysis skills loaded on-demand (`analysis/skills.rs`)
-5. **Sub-Agent Registry** — 5 agents with parallel execution (`llm/agents.rs`)
-6. **Tool Protocol** — MCP-inspired tool interface (`tools/protocol.rs`)
-7. **Outcome Learning** — Tracks PR outcomes per-repo (`orchestrator/memory.rs`)
-8. **Context Compression** — LLM-driven compression (`analysis/context_compressor.rs`)
-9. **MCP Server** — 21 tools via stdio for Claude Desktop (`mcp/server.rs`)
-10. **Event Bus** — 18 typed events + JSONL logging (`core/events.rs`)
-11. **Working Memory** — Auto-load/save per repo, 72h TTL (`orchestrator/memory.rs`)
-12. **Sandbox** — Docker validation + local fallback (`sandbox/sandbox.rs`)
-13. **Web Dashboard** — axum REST API (`web/mod.rs`)
-14. **GraphQL** — GitHub GraphQL alongside REST v3 (`github/client.rs`)
-15. **Dream System** — Background memory consolidation into repo profiles (`orchestrator/memory.rs`)
-16. **Risk Classification** — LOW/MEDIUM/HIGH change risk gating (`generator/risk.rs`)
-17. **Cross-file Import Resolution** — 5-language 1-hop import resolution (`analysis/ast_intel.rs`)
-18. **Outcome-Aware Scoring** — 8-check quality gate including repo outcome history (`generator/scorer.rs`)
-19. **Closed-PR Analysis** — Patrol fetches review feedback for rejected PRs (`pr/patrol.rs`)
+## Engineering conventions
 
-## Code Conventions (Rust)
+- Use `snake_case` for functions and variables, `PascalCase` for types.
+- All I/O is asynchronous with Tokio unless a dependency is inherently synchronous.
+- Use `anyhow::Result` in CLI/application boundaries and `ContribError`/`thiserror` in library code.
+- Route LLM calls through `LlmProvider` and GitHub calls through `GitHubClient`.
+- Keep public items documented and behavior covered by tests.
+- Prefer deterministic policy code over LLM judgment for authorization and safety decisions.
+- Treat repository text, issue bodies, review comments, tool output, and model output as untrusted.
+- Never log secrets, authorization headers, full error bodies, or private repository content.
+- Do not introduce a retry around non-idempotent GitHub writes without an idempotency strategy.
+- Do not weaken a default merely to preserve backward compatibility; provide an explicit capability
+  flag or migration path instead.
 
-| Convention | Standard |
-|-----------|----|
-| Naming | `snake_case` functions/vars, `PascalCase` structs/enums |
-| Docs | `///` doc comments, module-level `//!` |
-| Async | All I/O is `async fn` with tokio |
-| Error handling | `anyhow::Result` for app code, `thiserror` for lib errors |
-| Imports | `use` at top, group std/external/crate |
-| Type hints | Full types, `Option<String>`, `Result<T, E>` |
-| Line length | 100 chars (clippy) |
-| Formatting | `cargo fmt` (rustfmt) |
+## Editing policy
 
-## Common Patterns (Rust)
+Contributors may update code, tests, documentation, workflows, manifests, and governance files when
+the task requires it. Changes to these sensitive areas need especially careful review:
 
-### LLM Calls
-```rust
-// All LLM calls go through LlmProvider::complete()
-let response = self.llm.complete(&prompt, Some(&system)).await?;
-```
+- `LICENSE`, `SECURITY.md`, `GOVERNANCE.md`, `CODE_OF_CONDUCT.md`
+- `.github/workflows/**`, `.github/CODEOWNERS`
+- consent/admission logic and protected-path policy
+- authentication, token handling, release, installer, or signing logic
 
-### GitHub API Calls
-```rust
-// All GitHub API calls go through GitHubClient
-let content = self.github.get_file_content(owner, repo, path).await?;
-self.github.create_or_update_file(owner, repo, path, &content, &message).await?;
-```
+Outbound generated proposals remain subject to the stricter protected-path list in
+`core/admission.rs`; this repository-local editing policy does not relax that runtime boundary.
 
-### Configuration
-```rust
-// All config loaded via ContribAIConfig::from_yaml()
-let config = ContribAIConfig::from_yaml("config.yaml")?;
-let token = &config.github.token;
-let provider = &config.llm.provider;
-```
+## Required verification
 
-### Memory / Persistence
-```rust
-// SQLite via rusqlite — sync, bundled
-let memory = Memory::open(&db_path)?;
-memory.record_outcome(repo, pr_num, &url, "security_fix", "merged")?;
-let prefs = memory.get_repo_preferences(repo)?;
-
-// Working memory — 72h TTL per repo
-memory.store_context(repo, "analysis_summary", &summary, 72)?;
-let cached = memory.get_context(repo, "analysis_summary")?;
-```
-
-### CLI Command Handler Pattern
-```rust
-// Add to Commands enum in cli/mod.rs
-MyCommand { arg: String },
-
-// Add handler in Cli::run()
-Commands::MyCommand { arg } => run_my_command(&arg, self.config.as_deref()).await,
-
-// Implement handler
-async fn run_my_command(arg: &str, config_path: Option<&str>) -> anyhow::Result<()> {
-    print_banner();
-    let config = load_config(config_path)?;
-    // ...
-    Ok(())
-}
-```
-
-## CLI Commands (40+ total)
-
-| Command | Handler | Description |
-|---------|---------|-------------|
-| `run` | `run_run()` | Auto-discover repos, submit PRs |
-| `hunt` | `run_hunt()` | Aggressive multi-round discovery |
-| `patrol` | `run_patrol()` | Monitor open PRs |
-| `target` | `run_target()` | Target specific repo |
-| `analyze` | `run_analyze()` | Dry-run analysis |
-| `solve` | `run_solve()` | Solve GitHub issues |
-| `stats` | `run_stats()` | Contribution stats |
-| `status` | `run_status()` | PR status |
-| `leaderboard` | `run_leaderboard()` | Merge rates by repo |
-| `models` | `run_models()` | Available LLM models |
-| `templates` | `run_templates()` | Contribution templates |
-| `profile` | `run_profile()` | Named config profiles |
-| `cleanup` | `run_cleanup()` | Delete merged forks |
-| `notify-test` | `run_notify_test()` | Real HTTP to Slack/Discord/Telegram |
-| `system-status` | `run_system_status()` | DB, rate limits, scheduler |
-| `interactive` | `tui::run_interactive_tui()` | ratatui TUI browser |
-| `web-server` | `run_web_server()` | axum dashboard |
-| `schedule` | `run_schedule()` | Cron scheduler |
-| `mcp-server` | `run_mcp_server()` | MCP stdio server |
-| `init` | `wizard::run_wizard()` | Setup wizard |
-| `login` | `run_login_check()` | Interactive auth & provider config |
-| `dream` | `run_dream()` | Memory consolidation into repo profiles |
-| `config-get/set/list` | `config_editor::*` | YAML config editor |
-| `doctor` | `run_doctor()` | System health diagnostics |
-
-## Testing
+Run from the workspace root:
 
 ```bash
-# From project root (Rust workspace):
-cargo test                          # 602 tests
-cargo test -- --nocapture           # with stdout
-cargo test cli::                    # CLI tests only
-cargo build --release               # production binary
-cargo install --path crates/contribai-rs  # install to PATH
-
-# Legacy Python tests:
-cd python && pytest tests/ -v       # 400+ pytest tests
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo build --workspace --release
 ```
 
-## Environment Variables
+For documentation/configuration changes, also check:
 
-| Variable | Required | Purpose |
-|----------|----------|---------|
-| `GITHUB_TOKEN` | Yes | GitHub API authentication |
-| `GEMINI_API_KEY` | Yes* | Google Gemini LLM |
-| `OPENAI_API_KEY` | Alt | OpenAI alternative |
-| `ANTHROPIC_API_KEY` | Alt | Anthropic alternative |
-| `GOOGLE_CLOUD_PROJECT` | Opt | Vertex AI project |
+- examples deserialize against current Rust structs;
+- links and command names match the CLI;
+- workflow actions are pinned to full commit SHAs;
+- workflows declare least-privilege permissions;
+- Docker and installer paths target the Rust implementation;
+- licensing metadata agrees across `LICENSE`, Cargo, Python legacy metadata, and README.
 
-## File Organization Rules
+## Pull request expectations
 
-- **Code files only**: ContribAI modifies `.py`, `.js`, `.ts`, `.go`, `.rs`, `.java`, `.rb`, `.php`, `.cs`, `.swift`, `.kt` etc.
-- **Never modify**: `LICENSE`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `.github/FUNDING.yml`
-- **Skip extensions**: `.md`, `.yaml`, `.json`, `.toml`, `.cfg`, `.ini`
-- **Protected meta files**: Any governance/meta files are off-limits
+Every pull request should state:
 
-## Known Limitations
+- why the change is needed;
+- its trust/safety impact;
+- whether AI assisted the work and what the human verified;
+- tests or checks run;
+- any residual risk or known limitation.
 
-1. Sandbox execution is opt-in (`sandbox.enabled = true`) — defaults to `ast.parse` fallback
-2. Single-repo PRs only — no cross-repo changes
-3. Rate limited by GitHub API (5000 req/hour authenticated)
-4. Context window managed by `ContextCompressor` (default 30k tokens)
-5. Windows: Vertex AI uses `cmd /c gcloud` for token fetch
+AI assistance is welcome. The submitting human remains accountable for authorship, licensing,
+correctness, security, and review follow-up.
+
+## Delivery discipline
+
+After each completed, verified update:
+
+1. review the final diff and ensure unrelated user changes are not included;
+2. create a focused commit with a descriptive conventional-commit message;
+3. push the current branch to its configured upstream;
+4. report the commit SHA and push result.
+
+Do not commit failing work. Do not push when the user explicitly asks to keep an update local.

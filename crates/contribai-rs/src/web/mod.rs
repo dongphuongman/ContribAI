@@ -403,14 +403,12 @@ async fn trigger_run(
 ) -> Result<(StatusCode, Json<TriggerResponse>), StatusCode> {
     verify_api_key(&headers, query.api_key.as_deref(), &state.api_keys)?;
 
-    // Note: actual pipeline execution requires config + env — this signals intent.
-    // In production: send to a tokio channel consumed by the scheduler.
-    info!("Manual run triggered via API");
+    info!("Manual run request rejected: no job queue is configured");
     Ok((
-        StatusCode::ACCEPTED,
+        StatusCode::NOT_IMPLEMENTED,
         Json(TriggerResponse {
-            status: "accepted",
-            message: "Pipeline run queued. Check /api/runs for progress.".into(),
+            status: "not_implemented",
+            message: "This server has no execution queue; use the CLI explicitly.".into(),
         }),
     ))
 }
@@ -423,12 +421,12 @@ async fn trigger_target(
 ) -> Result<(StatusCode, Json<TriggerResponse>), StatusCode> {
     verify_api_key(&headers, query.api_key.as_deref(), &state.api_keys)?;
 
-    info!("Targeted run triggered via API");
+    info!("Targeted run request rejected: no job queue is configured");
     Ok((
-        StatusCode::ACCEPTED,
+        StatusCode::NOT_IMPLEMENTED,
         Json(TriggerResponse {
-            status: "accepted",
-            message: "Targeted run queued.".into(),
+            status: "not_implemented",
+            message: "This server has no execution queue; use the CLI explicitly.".into(),
         }),
     ))
 }
@@ -529,7 +527,7 @@ async fn create_session(
         .get("name")
         .and_then(|v| v.as_str())
         .unwrap_or("default");
-    let mode = body.get("mode").and_then(|v| v.as_str()).unwrap_or("build");
+    let mode = body.get("mode").and_then(|v| v.as_str()).unwrap_or("plan");
     let session_id = uuid::Uuid::new_v4().to_string();
     state
         .memory
@@ -552,9 +550,17 @@ pub async fn run_server(
     host: &str,
     port: u16,
 ) -> crate::core::error::Result<()> {
+    let public_bind = is_public_bind(host);
+    if public_bind && config.web.api_keys.is_empty() {
+        return Err(crate::core::error::ContribError::Config(
+            "refusing unauthenticated public bind; configure web.api_keys or bind to localhost"
+                .into(),
+        ));
+    }
+
     let state = AppState {
         memory: Arc::new(memory),
-        version: "5.1.0",
+        version: crate::VERSION,
         api_keys: config.web.api_keys.clone(),
         webhook_secret: config.web.webhook_secret.clone(),
     };
@@ -603,6 +609,10 @@ pub async fn run_server(
     }
 
     Ok(())
+}
+
+fn is_public_bind(host: &str) -> bool {
+    !matches!(host, "127.0.0.1" | "localhost" | "::1")
 }
 
 /// Load TLS configuration from cert and key files.
@@ -671,7 +681,7 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
 <header>
   <h1>ContribAI</h1>
   <span><span id="status-dot"></span>Live</span>
-  <span id="version-badge">v5.1.0</span>
+  <span id="version-badge">see /api/health</span>
 </header>
 
 <div class="container">
@@ -681,11 +691,6 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
     <div class="stat-card"><div class="num" id="stat-open">-</div><div class="label">Open</div></div>
     <div class="stat-card"><div class="num" id="stat-ci">-</div><div class="label">CI Passed</div></div>
     <div class="stat-card"><div class="num" id="stat-repos">-</div><div class="label">Repos Targeted</div></div>
-  </div>
-
-  <div class="actions">
-    <button class="btn" onclick="triggerRun(false)">Run Now</button>
-    <button class="btn" style="background:#30363d" onclick="triggerRun(true)">Dry Run</button>
   </div>
 
   <div class="section">
@@ -730,14 +735,6 @@ async function fetchRepos() {
   const rows = repos.map(r => `<tr><td>${r.repo}</td><td>${r.pr_count}</td></tr>`).join('');
   document.getElementById('repos-table').innerHTML =
     `<table><thead><tr><th>Repository</th><th>PRs Submitted</th></tr></thead><tbody>${rows}</tbody></table>`;
-}
-
-async function triggerRun(dryRun) {
-  const r = await fetch('/api/run', { method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ dry_run: dryRun }) });
-  const d = await r.json();
-  alert(d.message);
 }
 
 async function init() {
@@ -902,6 +899,16 @@ mod tests {
     }
 
     #[test]
+    fn public_bind_detection_is_fail_closed() {
+        assert!(!is_public_bind("127.0.0.1"));
+        assert!(!is_public_bind("localhost"));
+        assert!(!is_public_bind("::1"));
+        assert!(is_public_bind("0.0.0.0"));
+        assert!(is_public_bind("192.0.2.10"));
+        assert!(is_public_bind("example.test"));
+    }
+
+    #[test]
     fn test_dashboard_html_nonempty() {
         assert!(!DASHBOARD_HTML.is_empty());
         assert!(DASHBOARD_HTML.contains("ContribAI"));
@@ -913,9 +920,9 @@ mod tests {
     #[test]
     fn test_trigger_response_structure() {
         let r = TriggerResponse {
-            status: "accepted",
+            status: "not_implemented",
             message: "test".into(),
         };
-        assert_eq!(r.status, "accepted");
+        assert_eq!(r.status, "not_implemented");
     }
 }

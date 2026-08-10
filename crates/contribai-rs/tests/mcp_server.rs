@@ -1,7 +1,7 @@
 //! MCP server tests.
 //!
 //! Tests the MCP tool argument parsing and error handling:
-//! - Tool call dispatch for all 21 tools
+//! - Capability-aware tool advertisement
 //! - Missing argument validation
 //! - Invalid argument type handling
 //! - JSON-RPC request/response format
@@ -17,14 +17,13 @@ fn test_mcp_server_module_exists() {
 
 #[test]
 fn test_mcp_tools_list_count() {
-    // MCP server registers 21 tools
-    // This test verifies the tool registration count
-    // (The actual count is verified at runtime by server startup)
-    let expected_tools = 21;
-    assert!(
-        expected_tools >= 20,
-        "MCP server should have at least 20 tools"
-    );
+    let read_only = contribai::mcp::server::advertised_tool_names(false);
+    let write_enabled = contribai::mcp::server::advertised_tool_names(true);
+    assert_eq!(read_only.len(), 12);
+    assert_eq!(write_enabled.len(), 19);
+    assert!(!read_only.contains(&"create_pr".to_string()));
+    assert!(!write_enabled.contains(&"create_pr".to_string()));
+    assert!(!write_enabled.contains(&"sign_cla".to_string()));
 }
 
 // ── Argument Validation ─────────────────────────────────────────────────
@@ -84,7 +83,7 @@ fn test_create_branch_requires_repo_and_branch() {
 
     let args = json!({"repo": "test", "branch_name": "feature/fix"});
     assert!(args["repo"].as_str().filter(|s| !s.is_empty()).is_some());
-    assert!(args["branch_name"].as_str().unwrap_or("").len() > 0);
+    assert!(!args["branch_name"].as_str().unwrap_or("").is_empty());
 }
 
 #[test]
@@ -97,7 +96,7 @@ fn test_create_pr_requires_title_and_body() {
 
     let args = json!({"title": "Fix bug", "body": "Description", "head": "fix:bug", "base": "main", "fork_owner": "test", "repo": "repo"});
     assert!(args["title"].as_str().filter(|s| !s.is_empty()).is_some());
-    assert!(args["body"].as_str().unwrap_or("").len() > 0);
+    assert!(!args["body"].as_str().unwrap_or("").is_empty());
 }
 
 // ── JSON-RPC Format Tests ───────────────────────────────────────────────

@@ -5,6 +5,7 @@
 
 use tracing::info;
 
+use crate::core::admission::EvidenceCapsule;
 use crate::core::error::Result;
 use crate::core::models::{Contribution, Finding};
 
@@ -83,6 +84,36 @@ impl HumanReviewer {
         }
 
         display_contribution(contribution, finding, repo_name);
+        prompt_decision().await
+    }
+
+    /// Review a contribution together with the independently generated evidence
+    /// that will be attached to its draft pull request.
+    pub async fn review_with_evidence(
+        &self,
+        contribution: &Contribution,
+        finding: &Finding,
+        repo_name: &str,
+        evidence: &EvidenceCapsule,
+    ) -> Result<ReviewDecision> {
+        if self.auto_approve {
+            info!(
+                permit = %evidence.permit_id,
+                "Trusted host approved contribution with evidence"
+            );
+            return Ok(ReviewDecision::new(ReviewAction::Approve));
+        }
+
+        display_contribution(contribution, finding, repo_name);
+        println!();
+        println!("  Evidence permit : {}", evidence.permit_id);
+        println!("  Base revision   : {}", evidence.base_sha);
+        println!(
+            "  Review scope    : {} file(s), {} changed line(s)",
+            evidence.file_count, evidence.changed_lines
+        );
+        println!("  Submission      : draft PR only");
+        println!();
         prompt_decision().await
     }
 }

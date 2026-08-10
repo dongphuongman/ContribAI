@@ -552,7 +552,7 @@ fn test_html_parses_valid_structure() {
 "#;
     let symbols = extract_symbols(source, "test.html");
     // HTML parser extracts element nodes — we expect at least some elements
-    assert!(symbols.len() > 0, "Should extract HTML elements");
+    assert!(!symbols.is_empty(), "Should extract HTML elements");
 }
 
 // ── CSS ──────────────────────────────────────────────────────────────────
@@ -589,7 +589,7 @@ body {
 "#;
     let symbols = extract_symbols(source, "test.css");
     // CSS parser extracts rule selectors
-    assert!(symbols.len() > 0, "Should extract CSS rules");
+    assert!(!symbols.is_empty(), "Should extract CSS rules");
 }
 
 // ── Edge Cases ───────────────────────────────────────────────────────────

@@ -101,7 +101,7 @@ pub struct PermissionConfig {
     #[serde(default = "PermissionSet::deny_all")]
     pub shell_command: PermissionSet,
     /// PR creation permissions.
-    #[serde(default = "PermissionSet::allow_all")]
+    #[serde(default = "PermissionSet::ask_all")]
     pub pr_create: PermissionSet,
 }
 
@@ -125,7 +125,7 @@ impl Default for PermissionConfig {
             file_create: PermissionSet::ask_all(),
             file_delete: PermissionSet::deny_all(),
             shell_command: PermissionSet::deny_all(),
-            pr_create: PermissionSet::allow_all(),
+            pr_create: PermissionSet::ask_all(),
         }
     }
 }
@@ -244,6 +244,10 @@ mod tests {
         assert_eq!(
             config.file_delete.evaluate("src/main.rs"),
             PermissionAction::Deny
+        );
+        assert_eq!(
+            config.pr_create.evaluate("owner/repo"),
+            PermissionAction::Ask
         );
     }
 }

@@ -49,7 +49,7 @@ pub async fn run_schedule(config_path: Option<&str>, cron: String) -> anyhow::Re
                     &event_bus,
                 );
 
-                // KAIROS: Run → Patrol → Dream (full autonomous loop)
+                // KAIROS: read-only analysis, patrol observation, memory consolidation.
                 tracing::info!("🔄 KAIROS cycle: Run → Patrol → Dream");
 
                 // 1. Pipeline run (discover + analyze + PR)
@@ -75,7 +75,7 @@ pub async fn run_schedule(config_path: Option<&str>, cron: String) -> anyhow::Re
                                 })
                             })
                             .collect();
-                        match patrol.patrol(&pr_values, false).await {
+                        match patrol.patrol(&pr_values, true).await {
                             Ok(r) => tracing::info!(
                                 checked = r.prs_checked,
                                 fixes = r.fixes_pushed,

@@ -237,7 +237,7 @@ mod tests {
     fn test_prioritize_prefers_sweet_spot_stars() {
         let _config = DiscoveryConfig::default();
         // We can't create a real GitHubClient, so we test prioritize directly
-        let repos = vec![
+        let repos = [
             make_repo("small", 10, 5, true),
             make_repo("sweet", 500, 5, true),
             make_repo("big", 50000, 5, true),

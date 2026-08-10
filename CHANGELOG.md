@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Repositioned ContribAI as a maintainer-governed contribution agent: analysis is read-only by
+  default and external writes require explicit operator intent, repository consent, scoped
+  admission, evidence, and interactive human review.
+- Pull requests are draft-only and branches are created from the attested base commit SHA.
+- Removed automated CLA signing and unsolicited issue creation paths.
+- Replaced the source-available Commons Clause combination with unmodified AGPL-3.0-or-later.
+- Disabled scheduled execution by default and required authentication for non-loopback web binds.
+
+### Added
+- Repository consent manifest and issue-label approval protocol.
+- Evidence capsules, protected-path checks, scope budgets, and expiring contribution permits.
+- Threat model, governance, maintainer, code-of-conduct, and AI-contribution policies.
+- Locked multi-platform CI, RustSec audit, dependency review, OpenSSF Scorecard, release checksums,
+  and GitHub artifact attestations.
+
 ## [6.8.0] - 2026-04-28
 
 ### Added

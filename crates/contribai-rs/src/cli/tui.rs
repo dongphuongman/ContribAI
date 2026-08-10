@@ -362,7 +362,7 @@ fn render_title(f: &mut Frame, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "v5.1.0 — Interactive Mode  ",
+            concat!("v", env!("CARGO_PKG_VERSION"), " — Interactive Mode  "),
             Style::default().fg(Color::DarkGray),
         ),
         Span::styled(

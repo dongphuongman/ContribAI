@@ -49,7 +49,7 @@ logs/
 
 # Rust build artifacts
 /target/
-Cargo.lock
+# This repository ships an application, so Cargo.lock is committed for reproducible builds.
 
 # Release binaries (built locally)
 contribai-*.exe

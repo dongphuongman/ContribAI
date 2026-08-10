@@ -1,56 +1,79 @@
-version: "3.9"
-
 services:
-  # ── Dashboard mode ─────────────────────────────────
   dashboard:
-    build: .
-    container_name: contribai-dashboard
-    command: ["serve", "--host", "0.0.0.0"]
+    build:
+      context: .
+    image: contribai:local
+    command:
+      - --config
+      - /home/contribai/config.yaml
+      - web-server
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8787"
     ports:
-      - "8787:8787"
+      - "127.0.0.1:8787:8787"
     volumes:
       - contribai-data:/home/contribai/.contribai
       - ./config.yaml:/home/contribai/config.yaml:ro
     environment:
-      - GITHUB_TOKEN=${GITHUB_TOKEN}
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      # The server itself fails closed when this is empty on a non-loopback bind.
+      CONTRIBAI_WEB_API_KEY: ${CONTRIBAI_WEB_API_KEY:-}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8787/api/health')"]
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8787/api/health"]
       interval: 30s
       timeout: 5s
       retries: 3
 
-  # ── Scheduler mode ─────────────────────────────────
   scheduler:
-    build: .
-    container_name: contribai-scheduler
-    command: ["schedule"]
+    build:
+      context: .
+    image: contribai:local
+    command: ["--config", "/home/contribai/config.yaml", "schedule"]
+    profiles: ["scheduler"]
     volumes:
       - contribai-data:/home/contribai/.contribai
       - ./config.yaml:/home/contribai/config.yaml:ro
     environment:
-      - GITHUB_TOKEN=${GITHUB_TOKEN}
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
-    restart: unless-stopped
-    depends_on:
-      dashboard:
-        condition: service_healthy
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
 
-  # ── One-shot run ───────────────────────────────────
-  # Usage: docker compose run --rm runner run --dry-run
   runner:
-    build: .
-    container_name: contribai-runner
+    build:
+      context: .
+    image: contribai:local
+    profiles: ["cli"]
     volumes:
       - contribai-data:/home/contribai/.contribai
       - ./config.yaml:/home/contribai/config.yaml:ro
     environment:
-      - GITHUB_TOKEN=${GITHUB_TOKEN}
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
-    profiles:
-      - cli
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
 
 volumes:
   contribai-data:
-    driver: local

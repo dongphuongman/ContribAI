@@ -210,26 +210,6 @@ async fn factory_creates_openai_and_anthropic() {
 
 // ── UTF-8 split across SSE chunk boundaries ───────────────────────────────────
 
-/// Responder that streams the SSE body byte-by-byte, forcing every multi-byte
-/// UTF-8 character to be split across reqwest chunk boundaries.
-struct ByteByByte {
-    body: Vec<u8>,
-}
-
-impl Respond for ByteByByte {
-    fn respond(&self, _req: &Request) -> ResponseTemplate {
-        // wiremock collapses set_body_bytes into one HTTP body, but reqwest's
-        // bytes_stream will still chunk at the network layer. To guarantee
-        // mid-codepoint splits, we don't rely on chunking — instead we emit a
-        // payload where multi-byte chars fall on every position, and rely on
-        // the parser to handle a single contiguous slice plus a forced "split"
-        // produced by trimming the stream into two halves below.
-        ResponseTemplate::new(200)
-            .insert_header("content-type", "text/event-stream")
-            .set_body_bytes(self.body.clone())
-    }
-}
-
 /// SSE payload exercise: Vietnamese + emoji + CJK so any mishandled split
 /// would corrupt visible characters.
 fn unicode_openai_sse() -> Vec<u8> {

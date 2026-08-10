@@ -1,4 +1,4 @@
-//! Handles `Commands::Run` — auto-discover repos, analyze code, and submit PRs.
+//! Handles `Commands::Run` — discover and assess contribution candidates.
 
 use colored::Colorize;
 
@@ -12,18 +12,17 @@ pub async fn run_run(
     language: Option<String>,
     stars: Option<String>,
     dry_run: bool,
+    submit: bool,
     approve: bool,
-    mode: String,
 ) -> anyhow::Result<()> {
     print_banner();
     let mut config = load_config(config_path)?;
+    let effective_dry_run = dry_run || !submit;
+    let effective_mode = if submit { "build" } else { "plan" };
 
-    // Override agent mode from CLI
-    if mode != "build" {
-        config.pipeline.agent_mode = mode.clone();
-    }
+    config.pipeline.agent_mode = effective_mode.to_string();
 
-    print_config_summary(&config, dry_run);
+    print_config_summary(&config, effective_dry_run);
 
     if let Some(lang) = &language {
         println!("   {}: {}", "Language".dimmed(), lang.cyan());
@@ -41,12 +40,19 @@ pub async fn run_run(
     println!(
         "   {}: {}",
         "Mode".dimmed(),
-        if mode == "plan" {
+        if effective_mode == "plan" {
             "plan (read-only analysis)".yellow().to_string()
         } else {
             "build (full PR flow)".green().to_string()
         }
     );
+    if !submit {
+        println!(
+            "   {}: {}",
+            "Submission".dimmed(),
+            "disabled (pass --submit for admitted draft PRs)".yellow()
+        );
+    }
     println!();
 
     let github = create_github(&config)?;
@@ -71,8 +77,9 @@ pub async fn run_run(
         &event_bus,
     );
     pipeline.set_approve_high_risk(approve);
+    pipeline.enable_external_writes(submit);
 
-    let result = pipeline.run(None, dry_run).await?;
-    print_result(&result, dry_run);
+    let result = pipeline.run(None, effective_dry_run).await?;
+    print_result(&result, effective_dry_run);
     Ok(())
 }

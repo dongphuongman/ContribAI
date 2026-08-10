@@ -1,40 +1,48 @@
-## Description
-<!-- What does this PR do? Why is it needed? -->
+## Why
 
-## Type
-- [ ] `feat` – New feature
-- [ ] `fix` – Bug fix
-- [ ] `refactor` – Code restructuring
-- [ ] `docs` – Documentation
-- [ ] `test` – Tests
-- [ ] `perf` – Performance
-- [ ] `chore` – Maintenance
+<!-- What maintainer/user problem does this solve? Link an issue when available. -->
 
-## Changes
-<!-- List the key changes made -->
+## What changed
 
-## Architecture Area
-<!-- Which v2.5.0 component does this touch? -->
-- [ ] Middleware chain (`core/middleware.py`)
-- [ ] Analysis / Skills (`analysis/analyzer.py`, `analysis/skills.py`)
-- [ ] Sub-agents (`agents/registry.py`)
-- [ ] Tools (`tools/protocol.py`)
-- [ ] Memory / Learning (`orchestrator/memory.py`)
-- [ ] PR Patrol (`pr/patrol.py`)
-- [ ] Pipeline (`orchestrator/pipeline.py`)
-- [ ] Other: <!-- specify -->
+<!-- Keep this concrete and scoped. -->
 
-## Pre-submit Checklist
+## Trust and safety impact
 
-> **⚠️ CI will auto-run on your PR. Please verify locally before pushing.**
+- [ ] No external-write, authentication, credential, sandbox, workflow, or release behavior changed
+- [ ] Safety-sensitive behavior changed and the threat model / deny-path tests were updated
 
-- [ ] `ruff check contribai/` passes (lint)
-- [ ] `ruff format --check contribai/ tests/` passes (format)
-- [ ] `pytest tests/ -v` passes (356+ tests)
-- [ ] Code follows project conventions (async, type hints, Google docstrings)
-- [ ] `from __future__ import annotations` at top of new files
-- [ ] No hardcoded secrets
-- [ ] DCO signoff on all commits (`git commit -s`)
+Explain any new capability, permission, network destination, persisted data, or residual risk:
 
-## Related Issues
+## Verification
+
+- [ ] `cargo fmt --all -- --check`
+- [ ] `cargo clippy --workspace --all-targets -- -D warnings`
+- [ ] `cargo test --workspace`
+- [ ] `cargo build --workspace --release`
+- [ ] User-facing docs/config examples match the implementation
+
+Commands and notable results:
+
+```text
+
+```
+
+## AI assistance
+
+- [ ] No meaningful AI assistance
+- [ ] AI assisted this change; I reviewed every changed file and remain accountable for it
+
+If assisted, name the tool/model if known and summarize what the human verified:
+
+## Checklist
+
+- [ ] The change is focused and does not reward unsolicited contribution volume
+- [ ] New GitHub writes are explicit, consented, bounded, and fail closed
+- [ ] No bot or agent performs a legal attestation for a person
+- [ ] No secrets, private code, or personal data were added
+- [ ] Dependencies and copied material are license-compatible
+- [ ] Breaking behavior and migrations are documented
+
+## Related issues
+
 <!-- Closes #123 -->

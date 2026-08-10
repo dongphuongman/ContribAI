@@ -161,7 +161,7 @@ fn test_scheduler_config_default_cron() {
         config.cron, "0 */6 * * *",
         "Default cron should be every 6 hours"
     );
-    assert!(config.enabled, "Scheduler should be enabled by default");
+    assert!(!config.enabled, "Scheduler should be disabled by default");
 }
 
 #[test]
@@ -181,7 +181,7 @@ fn test_scheduler_config_partial_yaml() {
     let yaml = "cron: \"30 */2 * * *\"";
     let config: SchedulerConfig = serde_yaml::from_str(yaml).unwrap();
     assert_eq!(config.cron, "30 */2 * * *");
-    assert!(config.enabled); // default preserved
+    assert!(!config.enabled); // safe default preserved
 }
 
 #[test]

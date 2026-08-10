@@ -1,3 +1,4 @@
+pub mod admission;
 pub mod config;
 pub mod crypto;
 pub mod error;
