@@ -1,18 +1,32 @@
-﻿$Version = "v6.8.0"
+[CmdletBinding()]
+param()
+
+$Version = "v6.9.0"
 $ErrorActionPreference = "Stop"
 $Repo = "tang-vu/ContribAI"
 $Binary = "contribai-$Version-windows-x86_64.exe"
-$ExpectedSha256 = "7450ac2fe313193fd68c313ac3b736c86bb4ddbe3df59334ef4ee56f4f4013a2"
-$InstallDir = "$env:USERPROFILE\.contribai\bin"
+$InstallDir = if ($env:CONTRIBAI_INSTALL_DIR) {
+    $env:CONTRIBAI_INSTALL_DIR
+} else {
+    "$env:USERPROFILE\.contribai\bin"
+}
 $Url = "https://github.com/$Repo/releases/download/$Version/$Binary"
+$ChecksumUrl = "$Url.sha256"
 
 Write-Host "Installing ContribAI $Version for Windows..." -ForegroundColor Cyan
 $OutPath = Join-Path $InstallDir "contribai.exe"
 $TempPath = Join-Path ([IO.Path]::GetTempPath()) "contribai-$([Guid]::NewGuid()).tmp"
+$ChecksumTempPath = "$TempPath.sha256"
 
 try {
     Write-Host "  Downloading: $Url"
     Invoke-WebRequest -Uri $Url -OutFile $TempPath -UseBasicParsing
+    Invoke-WebRequest -Uri $ChecksumUrl -OutFile $ChecksumTempPath -UseBasicParsing
+
+    $ExpectedSha256 = ((Get-Content -LiteralPath $ChecksumTempPath -TotalCount 1) -split '\s+')[0].ToLowerInvariant()
+    if ($ExpectedSha256 -notmatch '^[0-9a-f]{64}$') {
+        throw "Release checksum is malformed; refusing to install."
+    }
 
     $ActualSha256 = (Get-FileHash -Path $TempPath -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($ActualSha256 -ne $ExpectedSha256) {
@@ -28,16 +42,22 @@ try {
     if (Test-Path $TempPath) {
         Remove-Item -LiteralPath $TempPath -Force
     }
+    if (Test-Path $ChecksumTempPath) {
+        Remove-Item -LiteralPath $ChecksumTempPath -Force
+    }
 }
 
-# Add to user PATH if not already there
+# Add to user PATH unless an isolated smoke install requested otherwise.
 $UserPath = [Environment]::GetEnvironmentVariable("PATH", "User")
-if ($UserPath -notlike "*$InstallDir*") {
-    [Environment]::SetEnvironmentVariable("PATH", "$UserPath;$InstallDir", "User")
+$PathEntries = @($UserPath -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+$ShouldUpdatePath = $env:CONTRIBAI_NO_PATH_UPDATE -ne "1"
+if ($ShouldUpdatePath -and $InstallDir -notin $PathEntries) {
+    $NewUserPath = (@($PathEntries) + $InstallDir) -join ';'
+    [Environment]::SetEnvironmentVariable("PATH", $NewUserPath, "User")
     Write-Host "  Added $InstallDir to PATH" -ForegroundColor Green
 }
 
 Write-Host ""
 Write-Host "ContribAI installed successfully!" -ForegroundColor Green
 Write-Host "  Location: $OutPath"
-Write-Host "  Restart your terminal, then run: contribai init" -ForegroundColor Yellow
+Write-Host "  Run 'contribai demo' before adding credentials." -ForegroundColor Yellow

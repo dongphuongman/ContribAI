@@ -83,8 +83,14 @@ try {
     assert(html.includes(claim), `Missing product-contract language: ${claim}`);
   }
 
-  const commands = ["contribai init", "contribai consent-check", "contribai analyze"];
+  const commands = ["contribai demo", "contribai init", "contribai consent-check", "contribai analyze"];
   for (const command of commands) assert(html.includes(command), `Missing quick-start command: ${command}`);
+
+  assert(/data-demo-start/.test(html), "Offline walkthrough control is missing");
+  assert(
+    collect(/data-demo-line(?:\s|>)/g, html).length === 7,
+    "Offline walkthrough must render all seven policy steps"
+  );
 
   const manifest = JSON.parse(readSiteFile("site.webmanifest"));
   assert(manifest.name === "ContribAI", "Web manifest name is invalid");

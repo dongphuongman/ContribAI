@@ -1,3 +1,5 @@
+document.documentElement.classList.add("js");
+
 const status = document.querySelector(".copy-status");
 let statusTimer;
 
@@ -62,3 +64,54 @@ for (const button of document.querySelectorAll("[data-copy]")) {
     }
   });
 }
+
+const demoButton = document.querySelector("[data-demo-start]");
+const demoLines = [...document.querySelectorAll("[data-demo-line]")];
+const demoLive = document.querySelector(".demo-live");
+let demoTimers = [];
+
+function clearDemoTimers() {
+  for (const timer of demoTimers) window.clearTimeout(timer);
+  demoTimers = [];
+}
+
+function runDemoWalkthrough() {
+  if (!demoButton || demoLines.length === 0) return;
+
+  clearDemoTimers();
+  demoButton.disabled = true;
+  demoButton.textContent = "Running policy…";
+  for (const line of demoLines) line.classList.remove("is-active");
+
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const interval = reducedMotion ? 0 : 520;
+
+  demoLines.forEach((line, index) => {
+    demoTimers.push(
+      window.setTimeout(() => {
+        line.classList.add("is-active");
+        if (demoLive) {
+          const label = line.querySelector("strong")?.textContent ?? "Policy step";
+          const outcome = line.querySelector("b")?.textContent ?? "complete";
+          demoLive.textContent = label + ": " + outcome;
+        }
+      }, interval * index),
+    );
+  });
+
+  demoTimers.push(
+    window.setTimeout(
+      () => {
+        demoButton.disabled = false;
+        demoButton.textContent = "Run again";
+        if (demoLive) {
+          demoLive.textContent =
+            "Walkthrough complete. External writes remained disabled and submission was not attempted.";
+        }
+      },
+      interval * demoLines.length + (reducedMotion ? 0 : 180),
+    ),
+  );
+}
+
+if (demoButton) demoButton.addEventListener("click", runDemoWalkthrough);

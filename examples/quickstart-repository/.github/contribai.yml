@@ -1,0 +1,8 @@
+# Maintainer-owned opt-in for the bundled quickstart fixture.
+schema_version: 1
+enabled: true
+max_files: 2
+max_changed_lines: 40
+allowed_paths:
+  - src/**
+  - tests/**

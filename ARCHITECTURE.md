@@ -42,6 +42,8 @@ legacy reference implementation.
 - `orchestrator/memory.rs` stores local outcomes and short-lived working context in SQLite.
 - `web/` is an observability API. It does not claim to queue runs; public binds require an API key.
 - `mcp/` exposes tools over stdio with read-only defaults.
+- `cli/commands/demo.rs` exercises the production consent, admission, and evidence policy against
+  bundled values without loading configuration, credentials, network clients, or write capability.
 - `site/` is a static public onboarding surface, not part of the runtime trust boundary. It has no
   backend, credentials, analytics, cookies, or write capability.
 

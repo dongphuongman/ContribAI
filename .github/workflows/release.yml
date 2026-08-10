@@ -85,3 +85,46 @@ jobs:
           files: |
             contribai-${{ github.ref_name }}-${{ matrix.asset }}
             contribai-${{ github.ref_name }}-${{ matrix.asset }}.sha256
+
+  installer-smoke:
+    name: Installer smoke (${{ matrix.os }})
+    needs: release
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install and exercise release (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          CONTRIBAI_INSTALL_DIR: ${{ runner.temp }}/contribai-bin
+        run: |
+          bash ./install.sh
+          "$CONTRIBAI_INSTALL_DIR/contribai" --version
+          "$CONTRIBAI_INSTALL_DIR/contribai" demo --json > "$RUNNER_TEMP/contribai-demo.json"
+          node -e 'const fs=require("fs");const r=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(r.external_writes_enabled||r.submission!=="not_attempted"||!r.candidate.evidence_valid||r.protected_path_probe.admission_allowed)process.exit(1)' "$RUNNER_TEMP/contribai-demo.json"
+      - name: Install and exercise release (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CONTRIBAI_INSTALL_DIR: ${{ runner.temp }}\contribai-bin
+          CONTRIBAI_NO_PATH_UPDATE: "1"
+        run: |
+          & .\install.ps1
+          $binary = Join-Path $env:CONTRIBAI_INSTALL_DIR "contribai.exe"
+          & $binary --version
+          $receipt = Join-Path $env:RUNNER_TEMP "contribai-demo.json"
+          & $binary demo --json | Set-Content -LiteralPath $receipt -Encoding utf8
+          $report = Get-Content -LiteralPath $receipt -Raw | ConvertFrom-Json
+          if ($report.external_writes_enabled -or $report.submission -ne "not_attempted" -or -not $report.candidate.evidence_valid -or $report.protected_path_probe.admission_allowed) {
+              throw "Installed release failed the offline safety demo"
+          }

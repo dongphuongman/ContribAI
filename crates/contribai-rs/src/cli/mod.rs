@@ -79,6 +79,18 @@ mod capability_tests {
             })
         ));
     }
+
+    #[test]
+    fn demo_is_offline_and_has_no_write_capability_flag() {
+        let cli = Cli::try_parse_from(["contribai", "demo", "--json"]).expect("valid CLI");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Demo {
+                json: true,
+                manifest: None
+            })
+        ));
+    }
 }
 
 #[derive(Subcommand)]
@@ -203,6 +215,17 @@ enum Commands {
 
     /// Show version and build info
     Version,
+
+    /// Run the offline admission and evidence walkthrough (no config, token, or network)
+    Demo {
+        /// Emit a machine-readable safety receipt
+        #[arg(long)]
+        json: bool,
+
+        /// Validate a local consent manifest instead of the bundled fixture
+        #[arg(long)]
+        manifest: Option<std::path::PathBuf>,
+    },
 
     /// Analyze a repository without creating PRs (analysis-only, always dry run)
     Analyze {
@@ -507,6 +530,9 @@ impl Cli {
                 println!("contribai {} (Rust)", contribai::VERSION);
                 Ok(())
             }
+            Commands::Demo { json, manifest } => {
+                commands::demo::run_demo(json, manifest.as_deref())
+            }
             #[cfg(feature = "web")]
             Commands::WebServer { host, port } => {
                 commands::web_server::run_web_server(self.config.as_deref(), host, port).await
@@ -629,6 +655,7 @@ fn run_interactive_menu() -> anyhow::Result<Commands> {
         "🛠   Config set   — change a setting",
         "🔐  Login        — check auth status",
         "✨  Init         — setup wizard",
+        "🧪  Demo         — offline admission & evidence proof",
         "❌  Exit",
     ];
 
@@ -727,6 +754,10 @@ fn run_interactive_menu() -> anyhow::Result<Commands> {
         }
         22 => Commands::Login,
         23 => Commands::Init { output: None },
+        24 => Commands::Demo {
+            json: false,
+            manifest: None,
+        },
         _ => std::process::exit(0),
     })
 }

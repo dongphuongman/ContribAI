@@ -10,6 +10,8 @@ dashboard under `crates/contribai-rs/src/web/` and cannot operate a ContribAI ru
 - Everything is served from `site/`; there is no package manager or build step.
 - Scripts, styles, icons, and social artwork are repository-local.
 - The page has no analytics, trackers, cookies, forms, backend calls, or external fonts.
+- The walkthrough animation is user-triggered, honors reduced-motion preferences, and mirrors the
+  machine-readable output of `contribai demo`.
 - The content security policy disables network connections and form submission.
 - Claims about submission, consent, evidence, and human review must match the product contract in
   `AGENTS.md`.
@@ -31,7 +33,8 @@ node --check site/app.js
 ```
 
 The contract check catches missing assets, broken fragment links, duplicate IDs, remote executable
-assets, inline scripts or event handlers, stale canonical URLs, and removal of core safety claims.
+assets, inline scripts or event handlers, stale canonical URLs, incomplete demo steps, and removal
+of core safety claims.
 
 ## Deployment
 

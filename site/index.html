@@ -49,6 +49,7 @@
 
         <nav class="desktop-nav" aria-label="Primary navigation">
           <a href="#why">Why</a>
+          <a href="#demo">Demo</a>
           <a href="#protocol">Protocol</a>
           <a href="#quickstart">Quick start</a>
           <a href="#maintainers">Maintainers</a>
@@ -74,9 +75,9 @@
               exact human review, and an auditable evidence receipt before any draft proposal.
             </p>
             <div class="hero-actions">
-              <a class="button button-primary" href="#quickstart">Start read-only</a>
-              <a class="button button-ghost" href="https://github.com/tang-vu/ContribAI#readme">
-                Read the docs <span aria-hidden="true">→</span>
+              <a class="button button-primary" href="#demo">Run the offline proof</a>
+              <a class="button button-ghost" href="#quickstart">
+                Install safely <span aria-hidden="true">→</span>
               </a>
             </div>
             <ul class="hero-proof" aria-label="Core guarantees">
@@ -118,6 +119,61 @@
           <p><strong>public code</strong> ≠ permission to submit</p>
           <p><strong>generation</strong> ≠ admission</p>
           <p><strong>passing checks</strong> ≠ maintainer approval</p>
+        </div>
+      </section>
+
+      <section class="demo-section" id="demo" aria-labelledby="demo-title">
+        <div class="shell demo-grid">
+          <div class="demo-copy">
+            <p class="eyebrow">60-second proof · zero credentials</p>
+            <h2 id="demo-title">Watch the write gate stay closed.</h2>
+            <p>
+              The installed CLI exercises the production consent parser, permit binding,
+              admission controller, and Evidence v2 validator—then deliberately probes a protected
+              workflow path.
+            </p>
+            <div class="demo-command">
+              <code id="demo-command">contribai demo</code>
+              <button class="copy-button" type="button" data-copy="demo-command" aria-label="Copy offline demo command">Copy</button>
+            </div>
+            <div class="demo-actions">
+              <button class="button button-ink demo-run" type="button" data-demo-start aria-controls="demo-terminal">
+                Play walkthrough
+              </button>
+              <a class="text-link text-link-ink" href="https://github.com/tang-vu/ContribAI/blob/main/docs/QUICKSTART.md">
+                Open the five-minute guide <span aria-hidden="true">→</span>
+              </a>
+            </div>
+            <ul class="demo-guarantees" aria-label="Offline demo guarantees">
+              <li>No config</li>
+              <li>No token</li>
+              <li>No network</li>
+              <li>No writes</li>
+            </ul>
+          </div>
+
+          <div class="demo-stage" id="demo-terminal" aria-label="Offline ContribAI policy walkthrough">
+            <div class="demo-stage-bar">
+              <span>contribai demo</span>
+              <strong>OFFLINE</strong>
+            </div>
+            <ol class="demo-lines">
+              <li data-demo-line><span>01</span><strong>CONSENT</strong><small>Manifest parsed · 2 files / 40 lines</small><b>PASS</b></li>
+              <li data-demo-line><span>02</span><strong>BIND</strong><small>Permit bound to repo + exact base SHA</small><b>PASS</b></li>
+              <li data-demo-line><span>03</span><strong>VERIFY</strong><small>Code + test candidate inside scope</small><b>PASS</b></li>
+              <li data-demo-line><span>04</span><strong>EVIDENCE</strong><small>Exact candidate validates against Evidence v2</small><b>PASS</b></li>
+              <li class="demo-denied" data-demo-line><span>05</span><strong>PROBE</strong><small>.github/workflows/release.yml</small><b>DENIED</b></li>
+              <li class="demo-pending" data-demo-line><span>06</span><strong>REVIEW</strong><small>Human approval cannot be delegated</small><b>REQUIRED</b></li>
+              <li data-demo-line><span>07</span><strong>STOP</strong><small>Submission capability remained off</small><b>SAFE</b></li>
+            </ol>
+            <div class="demo-stage-footer">
+              <span>external_writes_enabled</span>
+              <strong>false</strong>
+              <span>submission</span>
+              <strong>not_attempted</strong>
+            </div>
+            <p class="demo-live" aria-live="polite"></p>
+          </div>
         </div>
       </section>
 
@@ -229,13 +285,13 @@
         <div class="shell quickstart-grid">
           <div class="quickstart-copy">
             <p class="eyebrow">Try it safely</p>
-            <h2 id="quickstart-title">Useful before it can write.</h2>
+            <h2 id="quickstart-title">Zero credentials to first proof.</h2>
             <p>
-              Inspect repository consent and analyze a target without granting submission
-              capability. Read-only is the default, not a special demo mode.
+              Exercise the safety boundary offline. Connect GitHub and an LLM only after the
+              policy behavior matches your expectations.
             </p>
             <div class="requirements">
-              <span>Rust binary</span><span>GitHub token</span><span>Your LLM provider</span>
+              <span>No config</span><span>No token</span><span>No network</span>
             </div>
           </div>
 
@@ -256,7 +312,16 @@
             </article>
 
             <article class="command-step">
-              <div class="command-meta"><span>2</span><strong>Configure locally</strong></div>
+              <div class="command-meta"><span>2</span><strong>Prove the boundary offline</strong></div>
+              <div class="command-box">
+                <code id="offline-command">contribai demo</code>
+                <button class="copy-button" type="button" data-copy="offline-command" aria-label="Copy offline demo command">Copy</button>
+              </div>
+              <p>Uses real admission and evidence code without reading secrets or touching the network.</p>
+            </article>
+
+            <article class="command-step">
+              <div class="command-meta"><span>3</span><strong>Configure locally</strong></div>
               <div class="command-box">
                 <code id="init-command">contribai init</code>
                 <button class="copy-button" type="button" data-copy="init-command" aria-label="Copy init command">Copy</button>
@@ -265,7 +330,7 @@
             </article>
 
             <article class="command-step">
-              <div class="command-meta"><span>3</span><strong>Inspect, then analyze</strong></div>
+              <div class="command-meta"><span>4</span><strong>Inspect, then analyze</strong></div>
               <div class="command-box command-box-multiline">
                 <code id="inspect-command">contribai consent-check tang-vu/ContribAI --json --require-consent
 contribai analyze https://github.com/owner/repo</code>
@@ -366,6 +431,14 @@ allowed_paths:
               </p>
             </details>
             <details>
+              <summary>Does the offline demo use separate mock policy logic?</summary>
+              <p>
+                No. It calls the production consent parser, permit issuer, admission controller,
+                Evidence v2 builder, and submission-time evidence validator. Only the repository
+                and candidate are bundled fixtures. GitHub, LLMs, and external writes are absent.
+              </p>
+            </details>
+            <details>
               <summary>Can public repositories be analyzed?</summary>
               <p>
                 Yes, subject to provider terms and local configuration. Analysis is not permission
@@ -401,10 +474,10 @@ allowed_paths:
       <section class="final-cta" aria-labelledby="cta-title">
         <div class="shell cta-inner">
           <p class="eyebrow eyebrow-light">Start with observation, not authority</p>
-          <h2 id="cta-title">Analyze the repo.<br>Keep the write gate closed.</h2>
-          <p>Install ContribAI, inspect a consent manifest, and run your first read-only analysis.</p>
+          <h2 id="cta-title">Prove the boundary.<br>Then choose whether to connect.</h2>
+          <p>Run the real admission and evidence path without a token, provider, or network call.</p>
           <div class="hero-actions cta-actions">
-            <a class="button button-primary" href="#quickstart">Try read-only</a>
+            <a class="button button-primary" href="#demo">Run offline proof</a>
             <a class="button button-dark-ghost" href="https://github.com/tang-vu/ContribAI">
               Star or contribute on GitHub <span aria-hidden="true">↗</span>
             </a>

@@ -1,9 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
-VERSION="v6.8.0"
+VERSION="v6.9.0"
 REPO="tang-vu/ContribAI"
-INSTALL_DIR="/usr/local/bin"
+INSTALL_DIR="${CONTRIBAI_INSTALL_DIR:-/usr/local/bin}"
 
 # Detect OS and arch
 OS=$(uname -s | tr "[:upper:]" "[:lower:]")
@@ -14,7 +14,6 @@ case "$OS" in
     case "$ARCH" in
       x86_64|amd64)
         BINARY="contribai-$VERSION-linux-x86_64"
-        EXPECTED_SHA256="23fad535c931211bab67e3675bd5f67df4603f13f376984e6477a63e3f59ea43"
         ;;
       *) echo "Unsupported Linux architecture: $ARCH"; exit 1 ;;
     esac ;;
@@ -22,11 +21,9 @@ case "$OS" in
     case "$ARCH" in
       arm64|aarch64)
         BINARY="contribai-$VERSION-macos-aarch64"
-        EXPECTED_SHA256="bd20e72b945a4f1d59d7d7305b2ce2e8d17f2199d666bd8bfbe649418431e737"
         ;;
       x86_64|amd64)
         BINARY="contribai-$VERSION-macos-x86_64"
-        EXPECTED_SHA256="bfd5a92d6492f75b80164402d0acca52af395d61c246b31f4f6905a4ee5e928e"
         ;;
       *) echo "Unsupported macOS architecture: $ARCH"; exit 1 ;;
     esac ;;
@@ -34,6 +31,7 @@ case "$OS" in
 esac
 
 URL="https://github.com/$REPO/releases/download/$VERSION/$BINARY"
+CHECKSUM_URL="$URL.sha256"
 
 echo "Installing ContribAI $VERSION..."
 echo "  OS: $OS | Arch: $ARCH"
@@ -42,9 +40,20 @@ echo "  Downloading from: $URL"
 echo ""
 
 TEMP_FILE=$(mktemp "${TMPDIR:-/tmp}/contribai.XXXXXX")
-trap 'rm -f "$TEMP_FILE"' EXIT
+CHECKSUM_FILE="$TEMP_FILE.sha256"
+trap 'rm -f "$TEMP_FILE" "$CHECKSUM_FILE"' EXIT
 
 curl -fsSL "$URL" -o "$TEMP_FILE"
+curl -fsSL "$CHECKSUM_URL" -o "$CHECKSUM_FILE"
+
+EXPECTED_SHA256=$(awk 'NR == 1 { print $1 }' "$CHECKSUM_FILE" | tr '[:upper:]' '[:lower:]')
+case "$EXPECTED_SHA256" in
+  *[!0-9a-f]*|"") echo "Release checksum is malformed; refusing to install." >&2; exit 1 ;;
+esac
+if [ "${#EXPECTED_SHA256}" -ne 64 ]; then
+  echo "Release checksum is malformed; refusing to install." >&2
+  exit 1
+fi
 
 if command -v sha256sum >/dev/null 2>&1; then
   ACTUAL_SHA256=$(sha256sum "$TEMP_FILE" | awk '{print $1}')
@@ -65,6 +74,10 @@ fi
 echo "  SHA256 checksum verified."
 chmod +x "$TEMP_FILE"
 
+if [ -n "${CONTRIBAI_INSTALL_DIR:-}" ]; then
+  mkdir -p "$INSTALL_DIR"
+fi
+
 if [ -w "$INSTALL_DIR" ]; then
   mv "$TEMP_FILE" "$INSTALL_DIR/contribai"
 else
@@ -74,4 +87,4 @@ fi
 
 echo ""
 echo "ContribAI installed successfully!"
-echo "Run: contribai init"
+echo "Run 'contribai demo' before adding credentials."

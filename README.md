@@ -7,7 +7,7 @@
 [![CI](https://github.com/tang-vu/ContribAI/actions/workflows/ci.yml/badge.svg)](https://github.com/tang-vu/ContribAI/actions/workflows/ci.yml)
 [![Rust](https://img.shields.io/badge/Rust-stable-f74c00?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-682%20passing-brightgreen)](#verification)
+[![Tests](https://img.shields.io/badge/tests-686%20passing-brightgreen)](#verification)
 
 [Website](https://tang-vu.github.io/ContribAI/) · [Why ContribAI](#why-contribai) · [Safety model](#safety-model) · [Quick start](#quick-start) · [Consent protocol](#consent-protocol) · [Architecture](#architecture)
 
@@ -88,17 +88,47 @@ See [the threat model](docs/THREAT_MODEL.md) and
 
 ## Quick start
 
+### Install a release
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tang-vu/ContribAI/main/install.sh | sh
+```
+
+On Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/tang-vu/ContribAI/main/install.ps1 | iex
+```
+
+The installers verify the release checksum. Their isolated install path is smoke-tested against the
+published binary on Linux, macOS, and Windows for every release.
+
 ### Build from source
 
-Requirements: Rust stable, Git, and a GitHub token with the minimum permissions needed for the
-operation you choose.
+Requirements: Rust stable and Git. Credentials are not needed for the offline proof.
 
 ```bash
 git clone https://github.com/tang-vu/ContribAI.git
 cd ContribAI
 cargo install --path crates/contribai-rs --locked
-contribai doctor
 ```
+
+### Prove the boundary offline
+
+Run the production consent, admission, and evidence path without config, credentials, network
+access, or external writes:
+
+```bash
+contribai demo
+contribai demo --json
+contribai demo --manifest examples/quickstart-repository/.github/contribai.yml --json
+```
+
+The demo also probes a protected workflow path and confirms that it is denied. Continue with the
+[five-minute walkthrough](docs/QUICKSTART.md) and inspect the bundled
+[quickstart repository](examples/quickstart-repository/README.md).
+
+### Connect locally
 
 Configure secrets through environment variables instead of committing them:
 
@@ -106,6 +136,7 @@ Configure secrets through environment variables instead of committing them:
 export GITHUB_TOKEN="..."
 export GEMINI_API_KEY="..."       # or OPENAI_API_KEY / ANTHROPIC_API_KEY
 contribai init
+contribai doctor
 ```
 
 ### Start safely
@@ -190,6 +221,7 @@ provenance attestation, or maintainer judgment.
 - Local/Docker validation, risk classification, quality scoring, and circuit breaking
 - Ratatui interface, read-only-by-default MCP server, and authenticated web dashboard
 - Draft PR lifecycle and explicit patrol response capability
+- Offline admission/evidence demo with a protected-path fail-closed probe
 
 The Python implementation under `python/` is legacy reference code. Rust under
 `crates/contribai-rs/` is the maintained implementation.
@@ -198,6 +230,7 @@ The Python implementation under `python/` is legacy reference code. Rust under
 
 | Command | Default behavior | Explicit mutation capability |
 |---|---|---|
+| `demo [--json]` | Offline policy and evidence walkthrough | None |
 | `analyze <url>` | Analyze only | None |
 | `target <url>` | Analyze and prepare candidate | `--submit` |
 | `run` | Discover and assess | `--submit` |
@@ -267,9 +300,11 @@ cargo test --workspace
 cargo build --workspace --release
 node scripts/check-site.mjs
 node --check site/app.js
+node scripts/check-installers.mjs
+(cd examples/quickstart-repository && npm test)
 ```
 
-The current workspace runs **682 passing tests** plus one intentionally ignored doctest.
+The current workspace runs **686 passing tests** plus one intentionally ignored doctest.
 
 ## Project policy
 

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.9.0] - 2026-08-10
+
 ### Changed
 - Repositioned ContribAI as a maintainer-governed contribution agent: analysis is read-only by
   default and external writes require explicit operator intent, repository consent, scoped
@@ -19,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   can no longer construct an auto-approving review gate.
 
 ### Added
+- `contribai demo` for an offline, JSON-capable proof of consent parsing, exact-SHA permit binding,
+  admission, Evidence v2 validation, and protected-path denial without config or credentials.
+- Bundled quickstart repository, five-minute walkthrough, interactive landing-page proof, and
+  release-installer smoke tests on Linux, macOS, and Windows.
 - Dependency-free public landing page with maintainer and contributor onboarding, a no-tracker
   content security policy, static contract checks, and a least-privilege GitHub Pages workflow.
 - `contribai consent-check` for read-only, JSON-capable repository consent and base-SHA inspection.
