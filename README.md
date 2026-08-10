@@ -7,7 +7,7 @@
 [![CI](https://github.com/tang-vu/ContribAI/actions/workflows/ci.yml/badge.svg)](https://github.com/tang-vu/ContribAI/actions/workflows/ci.yml)
 [![Rust](https://img.shields.io/badge/Rust-stable-f74c00?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-666%20passing-brightgreen)](#verification)
+[![Tests](https://img.shields.io/badge/tests-671%20passing-brightgreen)](#verification)
 
 [Why ContribAI](#why-contribai) · [Safety model](#safety-model) · [Quick start](#quick-start) · [Consent protocol](#consent-protocol) · [Architecture](#architecture)
 
@@ -127,20 +127,29 @@ the local operator must approve the exact evidence-bearing change interactively.
 
 ## Consent protocol
 
-Maintainers can opt in repository-wide with `.github/CONTRIBAI_ALLOW`:
+Maintainers can opt in repository-wide with `.github/contribai.yml`:
 
 ```yaml
+schema_version: 1
 enabled: true
 max_files: 3
 max_changed_lines: 120
 allowed_paths: src/**, tests/**
 ```
 
+The uppercase marker paths remain supported for compatibility with the experimental v1 protocol.
+
+Operators can inspect the gate without invoking an LLM or writing to GitHub:
+
+```bash
+contribai consent-check owner/repo
+contribai consent-check owner/repo --json --require-consent
+```
+
 For narrower approval, apply one of these labels to an issue:
 
-- `agent-ready`
-- `contribai-approved`
-- `ai-contribution-approved`
+- `contribai-approved` (canonical)
+- `agent-ready` or `ai-contribution-approved` (compatibility aliases)
 
 Issue approval is scoped to that issue. Repository consent is still bounded by its path and size
 budgets. Missing, malformed, or disabled consent is a denial.
@@ -249,7 +258,7 @@ cargo test --workspace
 cargo build --workspace --release
 ```
 
-The current workspace runs **666 passing tests** plus one intentionally ignored doctest.
+The current workspace runs **671 passing tests** plus one intentionally ignored doctest.
 
 ## Project policy
 

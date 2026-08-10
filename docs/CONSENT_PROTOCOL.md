@@ -10,16 +10,20 @@ workflow begins.
 
 ContribAI checks these paths in order:
 
-1. `.github/CONTRIBAI_ALLOW`
-2. `CONTRIBAI_ALLOW`
+1. `.github/contribai.yml` (canonical)
+2. `.github/CONTRIBAI_ALLOW` (legacy)
+3. `CONTRIBAI_ALLOW` (legacy)
 
 The format is intentionally small and line-oriented:
 
 ```yaml
+schema_version: 1
 enabled: true
 max_files: 5
 max_changed_lines: 250
-allowed_paths: src/**, tests/**
+allowed_paths:
+  - src/**
+  - tests/**
 ```
 
 ### Fields
@@ -29,7 +33,7 @@ allowed_paths: src/**, tests/**
 | `enabled` | yes | Must be exactly `true`; absence or `false` denies submission |
 | `max_files` | no | Maximum changed and test files; default `5` |
 | `max_changed_lines` | no | Approximate added-plus-removed line budget; default `250` |
-| `allowed_paths` | no | Comma-separated glob allowlist; empty means any non-protected code path |
+| `allowed_paths` | no | YAML list or comma-separated glob allowlist; empty means any non-protected code path |
 
 Unknown fields are ignored for forward compatibility. Invalid positive integers or invalid path
 patterns fail closed for affected proposals. Consent files never authorize changes to protected
@@ -42,9 +46,9 @@ permits. Existing draft pull requests remain visible and can be closed normally.
 
 A maintainer can approve a single issue by applying one of:
 
-- `agent-ready`
-- `contribai-approved`
-- `ai-contribution-approved`
+- `contribai-approved` (canonical)
+- `agent-ready` (compatibility alias)
+- `ai-contribution-approved` (compatibility alias)
 
 GitHub normally restricts label application to users with repository triage permission or above.
 ContribAI treats the label as intent to receive a proposal for that issue, not as acceptance of the
@@ -99,3 +103,17 @@ The protocol does not:
 - override repository contribution or security policy;
 - authorize vulnerability testing outside an explicit security program;
 - make bulk unsolicited GitHub activity acceptable.
+
+## Inspecting consent
+
+`consent-check` reads repository metadata, checks every supported manifest path, and attests the
+default branch SHA. It never invokes an LLM and never writes to GitHub:
+
+```bash
+contribai consent-check owner/repo
+contribai consent-check owner/repo --json --require-consent
+```
+
+`--require-consent` exits non-zero unless both a valid manifest and base revision are available,
+which makes the command suitable for CI and policy adapters. A successful check only opens the
+repository gate; it does not approve any particular patch.

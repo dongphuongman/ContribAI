@@ -1,14 +1,14 @@
 //! Risk classification for generated changes.
 //!
 //! Classifies each contribution as LOW/MEDIUM/HIGH risk
-//! to control auto-submission behavior.
+//! to decide whether a candidate may proceed to admission and human review.
 
 use std::fmt;
 
 /// Risk level for a generated change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RiskLevel {
-    /// Docs, comments, typos, formatting — safe to auto-submit.
+    /// Docs, comments, typos, formatting — lowest review risk.
     Low,
     /// Bug fixes, imports, naming — submit with review note.
     Medium,
@@ -31,7 +31,6 @@ impl fmt::Display for RiskLevel {
 pub struct RiskClassification {
     pub level: RiskLevel,
     pub reason: String,
-    pub auto_submit: bool,
 }
 
 /// Classify the risk level of a generated contribution.
@@ -56,7 +55,6 @@ pub fn classify_risk(
         return RiskClassification {
             level: RiskLevel::Low,
             reason: format!("Documentation change ({})", change_type),
-            auto_submit: true,
         };
     }
 
@@ -68,7 +66,6 @@ pub fn classify_risk(
         return RiskClassification {
             level: RiskLevel::Low,
             reason: format!("Style/formatting change ({})", change_type),
-            auto_submit: true,
         };
     }
 
@@ -77,7 +74,6 @@ pub fn classify_risk(
         return RiskClassification {
             level: RiskLevel::High,
             reason: format!("Large change: {} files, ~{} lines", file_count, diff_lines),
-            auto_submit: false,
         };
     }
 
@@ -89,7 +85,6 @@ pub fn classify_risk(
         return RiskClassification {
             level: RiskLevel::Medium,
             reason: format!("Security fix ({})", change_type),
-            auto_submit: true,
         };
     }
 
@@ -101,7 +96,6 @@ pub fn classify_risk(
         return RiskClassification {
             level: RiskLevel::High,
             reason: format!("Behavior/structural change ({})", change_type),
-            auto_submit: false,
         };
     }
 
@@ -110,7 +104,6 @@ pub fn classify_risk(
         return RiskClassification {
             level: RiskLevel::Medium,
             reason: format!("Small fix: {} file, ~{} lines", file_count, diff_lines),
-            auto_submit: true,
         };
     }
 
@@ -121,15 +114,14 @@ pub fn classify_risk(
             "Code change: {} ({} files, ~{} lines)",
             change_type, file_count, diff_lines
         ),
-        auto_submit: true,
     }
 }
 
 /// Check if a risk level is allowed given a tolerance setting.
 ///
-/// * `"low"` — only LOW risk changes auto-submit
+/// * `"low"` — only LOW risk candidates proceed
 /// * `"medium"` — LOW + MEDIUM (default)
-/// * `"high"` — everything auto-submits
+/// * `"high"` — every risk level may proceed to the mandatory gates
 pub fn is_within_tolerance(level: RiskLevel, tolerance: &str) -> bool {
     match tolerance {
         "low" => level == RiskLevel::Low,
@@ -146,21 +138,18 @@ mod tests {
     fn test_docs_are_low_risk() {
         let r = classify_risk("docs", &["README.md".into()], 10);
         assert_eq!(r.level, RiskLevel::Low);
-        assert!(r.auto_submit);
     }
 
     #[test]
     fn test_formatting_is_low_risk() {
         let r = classify_risk("formatting", &["src/main.rs".into()], 5);
         assert_eq!(r.level, RiskLevel::Low);
-        assert!(r.auto_submit);
     }
 
     #[test]
     fn test_security_fix_is_medium() {
         let r = classify_risk("security_fix", &["src/auth.rs".into()], 15);
         assert_eq!(r.level, RiskLevel::Medium);
-        assert!(r.auto_submit);
     }
 
     #[test]
@@ -168,21 +157,18 @@ mod tests {
         let files: Vec<String> = (0..5).map(|i| format!("file{}.rs", i)).collect();
         let r = classify_risk("code_quality", &files, 200);
         assert_eq!(r.level, RiskLevel::High);
-        assert!(!r.auto_submit);
     }
 
     #[test]
     fn test_refactor_is_high_risk() {
         let r = classify_risk("refactor", &["src/main.rs".into()], 50);
         assert_eq!(r.level, RiskLevel::High);
-        assert!(!r.auto_submit);
     }
 
     #[test]
     fn test_small_fix_is_medium() {
         let r = classify_risk("bug_fix", &["src/lib.rs".into()], 10);
         assert_eq!(r.level, RiskLevel::Medium);
-        assert!(r.auto_submit);
     }
 
     #[test]

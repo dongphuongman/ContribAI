@@ -16,7 +16,14 @@ use crate::core::models::{Contribution, FileChange, Issue, Repository};
 use crate::github::client::GitHubClient;
 
 /// Repository files that explicitly enable ContribAI writes.
-pub const CONSENT_PATHS: &[&str] = &[".github/CONTRIBAI_ALLOW", "CONTRIBAI_ALLOW"];
+///
+/// The YAML manifest is canonical. The marker-style paths remain readable for
+/// compatibility with the experimental v1 protocol.
+pub const CONSENT_PATHS: &[&str] = &[
+    ".github/contribai.yml",
+    ".github/CONTRIBAI_ALLOW",
+    "CONTRIBAI_ALLOW",
+];
 
 /// Labels that only repository collaborators with triage permission can normally apply.
 pub const MAINTAINER_APPROVAL_LABELS: &[&str] = &[
@@ -49,52 +56,30 @@ pub struct RepositoryConsent {
 }
 
 impl RepositoryConsent {
-    /// Parse the intentionally small, line-oriented consent format.
+    /// Parse the intentionally small consent manifest.
     ///
     /// A manifest is valid only when it contains `enabled: true`. Unknown fields
     /// are ignored so the format can evolve without making older clients unsafe.
     pub fn parse(path: &str, content: &str) -> Option<Self> {
-        let mut enabled = false;
-        let mut max_files = DEFAULT_MAX_FILES;
-        let mut max_changed_lines = DEFAULT_MAX_CHANGED_LINES;
-        let mut allowed_paths = Vec::new();
-
-        for raw_line in content.lines() {
-            let line = raw_line.split('#').next().unwrap_or("").trim();
-            let Some((raw_key, raw_value)) = line.split_once(':') else {
-                continue;
-            };
-            let key = raw_key.trim().to_ascii_lowercase();
-            let value = raw_value.trim().trim_matches(['\'', '"']);
-            match key.as_str() {
-                "enabled" => enabled = value.eq_ignore_ascii_case("true"),
-                "max_files" => {
-                    max_files = value.parse::<usize>().ok().filter(|v| *v > 0)?;
-                }
-                "max_changed_lines" => {
-                    max_changed_lines = value.parse::<usize>().ok().filter(|v| *v > 0)?;
-                }
-                "allowed_paths" => {
-                    allowed_paths.extend(
-                        value
-                            .trim_matches(['[', ']'])
-                            .split(',')
-                            .map(|item| item.trim().trim_matches(['\'', '"']))
-                            .filter(|item| !item.is_empty())
-                            .map(str::to_string),
-                    );
-                }
-                _ => {}
-            }
+        let manifest: ConsentManifest = serde_yaml::from_str(content).ok()?;
+        if !manifest.enabled {
+            return None;
+        }
+        let max_files = manifest.max_files.unwrap_or(DEFAULT_MAX_FILES);
+        let max_changed_lines = manifest
+            .max_changed_lines
+            .unwrap_or(DEFAULT_MAX_CHANGED_LINES);
+        if max_files == 0 || max_changed_lines == 0 {
+            return None;
         }
 
-        enabled.then(|| Self {
+        Some(Self {
             source: ConsentSource::RepositoryManifest {
                 path: path.to_string(),
             },
             max_files,
             max_changed_lines,
-            allowed_paths,
+            allowed_paths: manifest.allowed_paths.into_paths(),
             draft_only: true,
         })
     }
@@ -116,6 +101,40 @@ impl RepositoryConsent {
             allowed_paths: Vec::new(),
             draft_only: true,
         })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ConsentManifest {
+    #[serde(default)]
+    enabled: bool,
+    max_files: Option<usize>,
+    max_changed_lines: Option<usize>,
+    #[serde(default)]
+    allowed_paths: AllowedPaths,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(untagged)]
+enum AllowedPaths {
+    List(Vec<String>),
+    CommaSeparated(String),
+    #[default]
+    Empty,
+}
+
+impl AllowedPaths {
+    fn into_paths(self) -> Vec<String> {
+        let paths = match self {
+            Self::List(paths) => paths,
+            Self::CommaSeparated(paths) => paths.split(',').map(str::to_string).collect(),
+            Self::Empty => Vec::new(),
+        };
+        paths
+            .into_iter()
+            .map(|path| path.trim().to_string())
+            .filter(|path| !path.is_empty())
+            .collect()
     }
 }
 
@@ -471,7 +490,9 @@ pub fn is_protected_path(path: &str) -> bool {
             | "ai_policy.md"
             | "contribai_allow"
             | "contribai_block"
-    ) || normalized.starts_with(".github/workflows/")
+    ) || normalized == ".github/contribai.yml"
+        || normalized == ".github/contribai.yaml"
+        || normalized.starts_with(".github/workflows/")
         || normalized == ".github/funding.yml"
 }
 
@@ -590,6 +611,25 @@ mod tests {
     }
 
     #[test]
+    fn canonical_yaml_manifest_accepts_path_lists() {
+        let parsed = RepositoryConsent::parse(
+            ".github/contribai.yml",
+            "schema_version: 1\nenabled: true\nallowed_paths:\n  - src/**\n  - tests/**\n",
+        )
+        .expect("valid consent");
+        assert_eq!(parsed.allowed_paths, vec!["src/**", "tests/**"]);
+    }
+
+    #[test]
+    fn manifest_rejects_zero_budgets_and_malformed_yaml() {
+        assert!(
+            RepositoryConsent::parse(".github/contribai.yml", "enabled: true\nmax_files: 0")
+                .is_none()
+        );
+        assert!(RepositoryConsent::parse(".github/contribai.yml", "enabled: [true").is_none());
+    }
+
+    #[test]
     fn issue_consent_requires_maintainer_label() {
         let mut issue = Issue {
             number: 42,
@@ -621,14 +661,16 @@ mod tests {
     #[test]
     fn admission_blocks_governance_and_out_of_scope_paths() {
         let repo = repository("owner/repo");
-        let change = contribution("AGENTS.md", Some("old"), "new");
-        let permit = ContributionPermit::issue(&repo, "abc123", consent(&["src/**"]), None);
-        let report = AdmissionController::evaluate(&repo, &change, &permit, Utc::now());
-        assert!(!report.allowed);
-        assert!(report
-            .violations
-            .iter()
-            .any(|violation| matches!(violation, AdmissionViolation::ProtectedPath { .. })));
+        for path in ["AGENTS.md", ".github/contribai.yml"] {
+            let change = contribution(path, Some("old"), "new");
+            let permit = ContributionPermit::issue(&repo, "abc123", consent(&["**"]), None);
+            let report = AdmissionController::evaluate(&repo, &change, &permit, Utc::now());
+            assert!(!report.allowed, "{path} must remain protected");
+            assert!(report
+                .violations
+                .iter()
+                .any(|violation| matches!(violation, AdmissionViolation::ProtectedPath { .. })));
+        }
     }
 
     #[test]

@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Disabled scheduled execution by default and required authentication for non-loopback web binds.
 
 ### Added
+- `contribai consent-check` for read-only, JSON-capable repository consent and base-SHA inspection.
+- Canonical `.github/contribai.yml` manifests with YAML-list path allowlists; legacy consent marker
+  paths remain readable.
 - Repository consent manifest and issue-label approval protocol.
 - Evidence capsules, protected-path checks, scope budgets, and expiring contribution permits.
 - Threat model, governance, maintainer, code-of-conduct, and AI-contribution policies.

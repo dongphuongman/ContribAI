@@ -603,7 +603,7 @@ pub struct PipelineConfig {
     pub max_repos_per_run: usize,
     #[serde(default = "default_max_concurrent_repos")]
     pub max_concurrent_repos: usize,
-    /// Risk tolerance for auto-submission: "low", "medium" (default), "high".
+    /// Highest risk allowed to proceed to admission: "low", "medium" (default), "high".
     #[serde(default = "default_risk_tolerance")]
     pub risk_tolerance: String,
     /// Skip docs-only PRs unless repo explicitly accepts them (default: true).

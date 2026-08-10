@@ -7,6 +7,7 @@ pub mod circuit_breaker;
 pub mod cleanup;
 pub mod completions;
 pub mod config;
+pub mod consent_check;
 pub mod doctor;
 pub mod dream;
 pub mod encrypt_token;

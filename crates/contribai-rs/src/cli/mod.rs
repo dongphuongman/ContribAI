@@ -59,6 +59,26 @@ mod capability_tests {
             })
         ));
     }
+
+    #[test]
+    fn consent_check_is_read_only_and_supports_policy_mode() {
+        let cli = Cli::try_parse_from([
+            "contribai",
+            "consent-check",
+            "owner/repo",
+            "--json",
+            "--require-consent",
+        ])
+        .expect("valid CLI");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::ConsentCheck {
+                json: true,
+                require_consent: true,
+                ..
+            })
+        ));
+    }
 }
 
 #[derive(Subcommand)]
@@ -81,7 +101,7 @@ enum Commands {
         #[arg(long)]
         submit: bool,
 
-        /// Approve HIGH risk changes for auto-submission
+        /// Allow HIGH risk candidates to proceed to admission and human review
         #[arg(long)]
         approve: bool,
     },
@@ -108,7 +128,7 @@ enum Commands {
         #[arg(long)]
         submit: bool,
 
-        /// Approve HIGH risk changes for auto-submission
+        /// Allow HIGH risk candidates to proceed to admission and human review
         #[arg(long)]
         approve: bool,
     },
@@ -188,6 +208,20 @@ enum Commands {
     Analyze {
         /// Repository URL (e.g., https://github.com/owner/repo)
         url: String,
+    },
+
+    /// Inspect repository opt-in and base-revision readiness without writing
+    ConsentCheck {
+        /// Repository URL or owner/repo
+        url: String,
+
+        /// Emit a stable machine-readable report
+        #[arg(long)]
+        json: bool,
+
+        /// Exit non-zero unless repository consent and a base revision are available
+        #[arg(long)]
+        require_consent: bool,
     },
 
     /// Solve open issues in a repository
@@ -442,6 +476,19 @@ impl Cli {
             } => commands::target::run_target(self.config.as_deref(), url, dry_run, submit).await,
             Commands::Analyze { url } => {
                 commands::analyze::run_analyze(self.config.as_deref(), url).await
+            }
+            Commands::ConsentCheck {
+                url,
+                json,
+                require_consent,
+            } => {
+                commands::consent_check::run_consent_check(
+                    self.config.as_deref(),
+                    url,
+                    json,
+                    require_consent,
+                )
+                .await
             }
             Commands::Solve {
                 url,

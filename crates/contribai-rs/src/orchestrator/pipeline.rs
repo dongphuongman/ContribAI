@@ -107,7 +107,7 @@ pub struct ContribPipeline<'a> {
     router: std::sync::Mutex<TaskRouter>,
     /// Circuit breaker for LLM failures — stops pipeline after too many failures.
     circuit_breaker: CircuitBreaker,
-    /// Allow HIGH risk changes to auto-submit (set via --approve flag).
+    /// Allow HIGH risk candidates to proceed to mandatory admission and review.
     approve_high_risk: bool,
     /// External writes are capability-gated and disabled unless the caller opts in.
     external_writes_enabled: bool,
@@ -249,7 +249,7 @@ impl<'a> ContribPipeline<'a> {
         Self::new(config, github, llm, memory, event_bus)
     }
 
-    /// Set whether HIGH risk changes should be auto-submitted.
+    /// Set whether HIGH risk candidates may proceed to mandatory admission and review.
     pub fn set_approve_high_risk(&mut self, approve: bool) {
         self.approve_high_risk = approve;
     }

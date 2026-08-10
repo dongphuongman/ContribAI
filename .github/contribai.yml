@@ -1,0 +1,9 @@
+# ContribAI repository consent manifest, schema v1.
+# This file is itself protected by the admission controller.
+schema_version: 1
+enabled: true
+max_files: 4
+max_changed_lines: 180
+allowed_paths:
+  - crates/contribai-rs/src/**
+  - crates/contribai-rs/tests/**
