@@ -60,15 +60,22 @@ impl ReviewDecision {
 
 // ── HumanReviewer ──────────────────────────────────────────────────────────────
 
-/// Interactive review gate.  When `auto_approve` is set the gate passes
-/// every contribution automatically; otherwise it blocks on stdin.
+/// Interactive review gate. Production callers cannot pre-approve it.
 pub struct HumanReviewer {
     auto_approve: bool,
 }
 
 impl HumanReviewer {
-    pub fn new(auto_approve: bool) -> Self {
-        Self { auto_approve }
+    /// Construct the mandatory interactive review gate.
+    pub fn interactive() -> Self {
+        Self {
+            auto_approve: false,
+        }
+    }
+
+    #[cfg(test)]
+    fn auto_approving_for_test() -> Self {
+        Self { auto_approve: true }
     }
 
     /// Present a contribution for human review and return the decision.
@@ -109,10 +116,24 @@ impl HumanReviewer {
         println!("  Evidence permit : {}", evidence.permit_id);
         println!("  Base revision   : {}", evidence.base_sha);
         println!(
+            "  Change fingerprint: {}",
+            evidence.contribution_fingerprint
+        );
+        println!(
             "  Review scope    : {} file(s), {} changed line(s)",
             evidence.file_count, evidence.changed_lines
         );
+        println!("  Evidence expires: {}", evidence.expires_at.to_rfc3339());
         println!("  Submission      : draft PR only");
+        println!("  Evidence checks :");
+        for check in &evidence.checks {
+            println!(
+                "    [{}] {}: {}",
+                if check.passed { "pass" } else { "FAIL" },
+                check.name,
+                check.details
+            );
+        }
         println!();
         prompt_decision().await
     }
@@ -132,45 +153,71 @@ fn display_contribution(contribution: &Contribution, finding: &Finding, repo_nam
     println!("  Type       : {}", contribution.contribution_type);
     println!("  Severity   : {}", finding.severity);
     println!("  File       : {}", finding.file_path);
+    println!(
+        "  Lines      : {}",
+        match (finding.line_start, finding.line_end) {
+            (Some(start), Some(end)) => format!("{start}-{end}"),
+            (Some(start), None) => start.to_string(),
+            _ => "not specified".to_string(),
+        }
+    );
     println!("  Commit     : {}", contribution.commit_message);
-    println!("  Changes    : {} file(s)", contribution.changes.len());
+    println!(
+        "  Branch     : {}",
+        if contribution.branch_name.is_empty() {
+            "derived deterministically from the reviewed type and finding title"
+        } else {
+            &contribution.branch_name
+        }
+    );
+    println!(
+        "  Changes    : {} file(s)",
+        contribution.changes.len() + contribution.tests_added.len()
+    );
     println!();
 
-    // Truncate long descriptions to keep output readable.
-    let desc = if contribution.description.len() > 500 {
-        format!(
-            "{}… (truncated)",
-            crate::core::safe_truncate(&contribution.description, 500)
-        )
-    } else {
-        contribution.description.clone()
-    };
     println!("  Description:");
-    for line in desc.lines() {
+    for line in contribution.description.lines() {
         println!("    {}", line);
     }
     println!();
-
-    // Show up to three changed files.
-    for change in contribution.changes.iter().take(3) {
-        println!("  --- {} ---", change.path);
-        let preview = if change.new_content.len() > 400 {
-            format!(
-                "{}… ({} chars truncated)",
-                crate::core::safe_truncate(&change.new_content, 400),
-                change.new_content.len() - 400
-            )
-        } else {
-            change.new_content.clone()
-        };
-        for line in preview.lines() {
+    println!("  Finding:");
+    println!("    Title: {}", finding.title);
+    for line in finding.description.lines() {
+        println!("    {}", line);
+    }
+    if let Some(suggestion) = &finding.suggestion {
+        println!("  Suggested solution:");
+        for line in suggestion.lines() {
             println!("    {}", line);
         }
-        println!();
     }
+    println!();
 
-    if contribution.changes.len() > 3 {
-        println!("  … and {} more file(s)", contribution.changes.len() - 3);
+    // Human approval covers every byte that may be written. Do not truncate or
+    // omit test changes: the evidence fingerprint binds this exact rendering.
+    for (kind, change) in contribution
+        .changes
+        .iter()
+        .map(|change| ("change", change))
+        .chain(
+            contribution
+                .tests_added
+                .iter()
+                .map(|change| ("test", change)),
+        )
+    {
+        println!(
+            "  --- BEGIN {}: {} ({} bytes) ---",
+            kind,
+            change.path,
+            change.new_content.len()
+        );
+        print!("{}", change.new_content);
+        if !change.new_content.ends_with('\n') {
+            println!();
+        }
+        println!("  --- END {}: {} ---", kind, change.path);
         println!();
     }
 
@@ -315,11 +362,11 @@ mod tests {
         assert_eq!(d.reason, Some("some reason".to_string()));
     }
 
-    // ── HumanReviewer — auto_approve ──────────────────────────────────────────
+    // ── HumanReviewer — test-only bypass ─────────────────────────────────────
 
     #[tokio::test]
     async fn test_auto_approve_returns_approve() {
-        let reviewer = HumanReviewer::new(true);
+        let reviewer = HumanReviewer::auto_approving_for_test();
         let contribution = make_contribution();
         let finding = make_finding();
 
@@ -337,7 +384,7 @@ mod tests {
     async fn test_auto_approve_does_not_prompt() {
         // When auto_approve=true the reviewer must NOT block on stdin.
         // If it did, this test would hang forever.
-        let reviewer = HumanReviewer::new(true);
+        let reviewer = HumanReviewer::auto_approving_for_test();
         let contribution = make_contribution();
         let finding = make_finding();
 

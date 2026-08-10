@@ -1,6 +1,6 @@
 # ContribAI Consent Protocol
 
-Status: experimental, schema version 1.
+Status: experimental. Consent manifest schema: 1. Evidence capsule schema: 2.
 
 The protocol separates permission to read public code from permission to create an external
 proposal. Consent is explicit, narrow, revocable, and evaluated again immediately before the write
@@ -30,14 +30,20 @@ allowed_paths:
 
 | Field | Required | Meaning |
 |---|---:|---|
+| `schema_version` | no | If present, must be exactly `1` |
 | `enabled` | yes | Must be exactly `true`; absence or `false` denies submission |
 | `max_files` | no | Maximum changed and test files; default `5` |
 | `max_changed_lines` | no | Approximate added-plus-removed line budget; default `250` |
 | `allowed_paths` | no | YAML list or comma-separated glob allowlist; empty means any non-protected code path |
 
-Unknown fields are ignored for forward compatibility. Invalid positive integers or invalid path
-patterns fail closed for affected proposals. Consent files never authorize changes to protected
-governance or automation paths.
+Unknown fields, unsupported schema versions, invalid positive integers, and invalid path patterns
+invalidate the manifest. Strict parsing prevents a misspelled policy field from silently widening
+scope. Consent files never authorize changes to protected governance or automation paths.
+
+Allowed paths and generated file paths use canonical repository-relative POSIX syntax. Absolute
+paths, backslashes, empty components, `.`/`..` components, URI metacharacters, invalid globs,
+duplicate targets, and file deletions are denied. Literal glob separators are enforced, so `src/*`
+does not authorize `src/nested/file.rs`; use `src/**` for recursive scope.
 
 Removing the manifest or changing `enabled` to `false` revokes repository consent for future
 permits. Existing draft pull requests remain visible and can be closed normally.
@@ -52,7 +58,7 @@ A maintainer can approve a single issue by applying one of:
 
 GitHub normally restricts label application to users with repository triage permission or above.
 ContribAI treats the label as intent to receive a proposal for that issue, not as acceptance of the
-result. Removing the label prevents future permits.
+result. Removing the label or closing the issue prevents future permits.
 
 ## ContributionPermit
 
@@ -67,8 +73,9 @@ After consent is found, ContribAI issues a local permit containing:
 - draft-only requirement;
 - deterministic permit identifier.
 
-Permits expire after 24 hours. The generated branch is created at the recorded base SHA, preventing
-a moving default branch from silently changing the review basis.
+Permits expire after 24 hours. The base revision must be a full 40- or 64-hex Git object ID; an
+abbreviated SHA is not an attestation. The generated branch is created at the recorded base SHA,
+preventing a moving default branch from silently changing the review basis.
 
 ## Admission policy
 
@@ -78,6 +85,7 @@ Admission denies a proposal when any of these conditions is true:
 - consent or base revision is missing;
 - the permit expired or belongs to another repository;
 - file or changed-line budgets are exceeded;
+- a path is non-canonical, duplicated, or requests an unsupported deletion;
 - a path is outside the allowlist;
 - a protected governance, policy, funding, workflow, consent, or agent-instruction path is touched;
 - a risk, quality, or validation evidence check failed;
@@ -86,12 +94,18 @@ Admission denies a proposal when any of these conditions is true:
 ## EvidenceCapsule
 
 An admitted proposal receives an evidence capsule with the permit ID, consent source, base SHA,
-change fingerprint, paths, scope totals, checks, and generation time. The capsule is included in the
-draft pull-request description.
+expiry, change fingerprint, paths, scope totals, checks, and generation time. The fingerprint covers
+the complete write-relevant candidate: PR and finding metadata, branch and commit metadata, every
+regular change, and every test change. The capsule is included in the draft pull-request description.
+
+The interactive gate renders every proposed file byte and every evidence check without truncating or
+omitting test changes. Immediately before the first write, the PR manager recomputes the fingerprint
+and scope, rejects expired or failed evidence, then re-reads the current manifest or approved issue.
+Revoked or narrowed consent therefore fails closed even if generation and review already completed.
 
 The current capsule is a deterministic local audit receipt. It is not signed by a remote authority
 and does not prove that CI passed after submission. Future schema versions may add signatures or
-external policy-engine attestations without treating unsigned v1 receipts as stronger than they are.
+external policy-engine attestations without treating unsigned v2 receipts as stronger than they are.
 
 ## Non-goals
 
@@ -114,6 +128,6 @@ contribai consent-check owner/repo
 contribai consent-check owner/repo --json --require-consent
 ```
 
-`--require-consent` exits non-zero unless both a valid manifest and base revision are available,
+`--require-consent` exits non-zero unless both a valid manifest and full base revision are available,
 which makes the command suitable for CI and policy adapters. A successful check only opens the
 repository gate; it does not approve any particular patch.

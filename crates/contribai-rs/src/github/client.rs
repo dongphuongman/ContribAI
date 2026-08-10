@@ -634,6 +634,38 @@ impl GitHubClient {
             .collect())
     }
 
+    /// Fetch one issue so admission can revalidate its current state and labels.
+    pub async fn get_issue(&self, owner: &str, repo: &str, issue_number: i64) -> Result<Issue> {
+        let item = self
+            .get(&format!(
+                "/repos/{}/{}/issues/{}",
+                owner, repo, issue_number
+            ))
+            .await?;
+        if item.get("pull_request").is_some() {
+            return Err(ContribError::GitHub(format!(
+                "#{issue_number} is a pull request, not an issue"
+            )));
+        }
+        Ok(Issue {
+            number: item["number"].as_i64().unwrap_or(issue_number),
+            title: item["title"].as_str().unwrap_or("").to_string(),
+            body: item["body"].as_str().map(String::from),
+            labels: item["labels"]
+                .as_array()
+                .map(|labels| {
+                    labels
+                        .iter()
+                        .filter_map(|label| label["name"].as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            state: item["state"].as_str().unwrap_or("").to_string(),
+            created_at: None,
+            html_url: item["html_url"].as_str().unwrap_or("").to_string(),
+        })
+    }
+
     /// Try to fetch CONTRIBUTING.md.
     pub async fn get_contributing_guide(&self, owner: &str, repo: &str) -> Result<Option<String>> {
         for path in &[

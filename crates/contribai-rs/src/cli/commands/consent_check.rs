@@ -4,7 +4,9 @@ use colored::Colorize;
 use serde::Serialize;
 
 use crate::cli::{create_github, load_config, parse_github_url, print_banner};
-use contribai::core::admission::{discover_repository_consent, RepositoryConsent, CONSENT_PATHS};
+use contribai::core::admission::{
+    discover_repository_consent, is_full_commit_sha, RepositoryConsent, CONSENT_PATHS,
+};
 
 #[derive(Debug, Serialize)]
 struct ConsentCheckReport {
@@ -24,9 +26,10 @@ impl ConsentCheckReport {
         consent: Option<RepositoryConsent>,
         base_sha: Option<String>,
     ) -> Self {
+        let base_is_attested = base_sha.as_deref().is_some_and(is_full_commit_sha);
         let reason = if consent.is_none() {
             Some("no valid repository consent manifest was found")
-        } else if base_sha.is_none() {
+        } else if !base_is_attested {
             Some("the default branch revision could not be attested")
         } else {
             None
@@ -35,7 +38,7 @@ impl ConsentCheckReport {
             schema_version: 1,
             repository,
             consent_found: consent.is_some(),
-            repository_gate_ready: consent.is_some() && base_sha.is_some(),
+            repository_gate_ready: consent.is_some() && base_is_attested,
             checked_paths: CONSENT_PATHS.to_vec(),
             base_sha,
             consent,
@@ -122,6 +125,8 @@ mod tests {
     use super::*;
     use contribai::core::admission::ConsentSource;
 
+    const TEST_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
     fn consent() -> RepositoryConsent {
         RepositoryConsent {
             source: ConsentSource::RepositoryManifest {
@@ -140,7 +145,7 @@ mod tests {
             ConsentCheckReport::build(
                 "owner/repo".to_string(),
                 Some(consent()),
-                Some("abc123".to_string())
+                Some(TEST_SHA.to_string())
             )
             .repository_gate_ready
         );
@@ -154,11 +159,25 @@ mod tests {
         let report = ConsentCheckReport::build(
             "owner/repo".to_string(),
             Some(consent()),
-            Some("abc123".to_string()),
+            Some(TEST_SHA.to_string()),
         );
         let value = serde_json::to_value(report).expect("serializable report");
         assert_eq!(value["schema_version"], 1);
         assert_eq!(value["repository_gate_ready"], true);
         assert_eq!(value["consent"]["max_files"], 3);
+    }
+
+    #[test]
+    fn report_rejects_abbreviated_commit_ids() {
+        let report = ConsentCheckReport::build(
+            "owner/repo".to_string(),
+            Some(consent()),
+            Some("abc123".to_string()),
+        );
+        assert!(!report.repository_gate_ready);
+        assert_eq!(
+            report.reason,
+            Some("the default branch revision could not be attested")
+        );
     }
 }

@@ -7,7 +7,10 @@ use regex::Regex;
 use std::sync::LazyLock;
 use tracing::{info, warn};
 
-use crate::core::admission::EvidenceCapsule;
+use crate::core::admission::{
+    AdmissionController, ConsentSource, ContributionPermit, EvidenceCapsule, RepositoryConsent,
+    MAINTAINER_APPROVAL_LABELS,
+};
 use crate::core::error::{ContribError, Result};
 
 static RE_SLUG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^a-z0-9]+").unwrap());
@@ -89,6 +92,10 @@ impl<'a> PrManager<'a> {
         target_repo: &Repository,
         evidence: &EvidenceCapsule,
     ) -> Result<PrResult> {
+        self.validate_evidence(contribution, target_repo, evidence)?;
+        self.revalidate_consent(contribution, target_repo, evidence)
+            .await?;
+
         let user = self.get_user().await?;
         let username = user["login"].as_str().unwrap_or("").to_string();
         let signoff = Self::build_signoff(user);
@@ -170,6 +177,107 @@ impl<'a> PrManager<'a> {
         Ok(result)
     }
 
+    fn validate_evidence(
+        &self,
+        contribution: &Contribution,
+        target_repo: &Repository,
+        evidence: &EvidenceCapsule,
+    ) -> Result<()> {
+        evidence
+            .validate_for_submission(contribution, target_repo, chrono::Utc::now())
+            .map_err(|violations| {
+                ContribError::PrCreation(format!(
+                    "evidence validation failed: {}",
+                    violations
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ))
+            })
+    }
+
+    /// Re-read the maintainer-controlled authorization immediately before the
+    /// first external write and evaluate the exact reviewed contribution again.
+    async fn revalidate_consent(
+        &self,
+        contribution: &Contribution,
+        target_repo: &Repository,
+        evidence: &EvidenceCapsule,
+    ) -> Result<()> {
+        let consent = match &evidence.consent {
+            ConsentSource::RepositoryManifest { path } => {
+                let content = self
+                    .github
+                    .get_file_content(&target_repo.owner, &target_repo.name, path, None)
+                    .await
+                    .map_err(|_| {
+                        ContribError::PrCreation(
+                            "repository consent could not be revalidated before submission"
+                                .to_string(),
+                        )
+                    })?;
+                RepositoryConsent::parse(path, &content).ok_or_else(|| {
+                    ContribError::PrCreation(
+                        "repository consent was revoked or became invalid before submission"
+                            .to_string(),
+                    )
+                })?
+            }
+            ConsentSource::MaintainerLabel { issue, label } => {
+                let current_issue = self
+                    .github
+                    .get_issue(&target_repo.owner, &target_repo.name, *issue)
+                    .await
+                    .map_err(|_| {
+                        ContribError::PrCreation(
+                            "issue approval could not be revalidated before submission".to_string(),
+                        )
+                    })?;
+                let label_is_current = current_issue.state.eq_ignore_ascii_case("open")
+                    && current_issue.labels.iter().any(|current| {
+                        current.eq_ignore_ascii_case(label)
+                            && MAINTAINER_APPROVAL_LABELS
+                                .iter()
+                                .any(|allowed| current.eq_ignore_ascii_case(allowed))
+                    });
+                if !label_is_current {
+                    return Err(ContribError::PrCreation(
+                        "issue approval was revoked or the issue was closed before submission"
+                            .to_string(),
+                    ));
+                }
+                RepositoryConsent::from_issue(&current_issue).ok_or_else(|| {
+                    ContribError::PrCreation(
+                        "issue approval was revoked or became invalid before submission"
+                            .to_string(),
+                    )
+                })?
+            }
+        };
+
+        let permit = ContributionPermit::issue(
+            target_repo,
+            evidence.base_sha.clone(),
+            consent,
+            evidence.issue,
+        );
+        let report =
+            AdmissionController::evaluate(target_repo, contribution, &permit, chrono::Utc::now());
+        if !report.allowed {
+            return Err(ContribError::PrCreation(format!(
+                "current maintainer consent does not authorize this contribution: {}",
+                report
+                    .violations
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )));
+        }
+        Ok(())
+    }
+
     /// Fork if not already forked.
     ///
     /// After forking, waits for GitHub propagation (forks can take 5-30s
@@ -243,9 +351,20 @@ impl<'a> PrManager<'a> {
         let files_list: String = contribution
             .changes
             .iter()
-            .map(|c| {
-                let tag = if c.is_new_file { "(new)" } else { "(modified)" };
-                format!("- `{}` {}", c.path, tag)
+            .map(|change| ("change", change))
+            .chain(
+                contribution
+                    .tests_added
+                    .iter()
+                    .map(|change| ("test", change)),
+            )
+            .map(|(kind, change)| {
+                let operation = if change.is_new_file {
+                    "new"
+                } else {
+                    "modified"
+                };
+                format!("- `{}` ({operation}, {kind})", change.path)
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -331,6 +450,17 @@ impl<'a> PrManager<'a> {
             );
             return None;
         };
+        if let Err(error) = self.validate_evidence(contribution, target_repo, evidence) {
+            warn!(repo = %target_repo.full_name, %error, "Issue creation blocked by invalid evidence");
+            return None;
+        }
+        if let Err(error) = self
+            .revalidate_consent(contribution, target_repo, evidence)
+            .await
+        {
+            warn!(repo = %target_repo.full_name, %error, "Issue creation blocked by revoked consent");
+            return None;
+        }
         warn!(
             repo = %target_repo.full_name,
             permit = %evidence.permit_id,
@@ -750,8 +880,14 @@ pub fn inject_issue_link(body: &str, issue_number: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::admission::{AdmissionController, ConsentSource, EvidenceCapsule};
     use crate::core::models::{FileChange, Finding, Severity};
+    use base64::Engine as _;
     use chrono::Utc;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const TEST_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 
     fn test_contribution() -> Contribution {
         Contribution {
@@ -807,6 +943,21 @@ mod tests {
         }
     }
 
+    fn test_evidence(contribution: &Contribution, repository: &Repository) -> EvidenceCapsule {
+        let consent = RepositoryConsent {
+            source: ConsentSource::RepositoryManifest {
+                path: ".github/contribai.yml".to_string(),
+            },
+            max_files: 5,
+            max_changed_lines: 250,
+            allowed_paths: vec!["src/**".to_string()],
+            draft_only: true,
+        };
+        let permit = ContributionPermit::issue(repository, TEST_SHA, consent, None);
+        let report = AdmissionController::evaluate(repository, contribution, &permit, Utc::now());
+        EvidenceCapsule::build(contribution, &permit, &report, Vec::new())
+    }
+
     #[tokio::test]
     async fn legacy_pr_creation_fails_closed_without_evidence() {
         let github = GitHubClient::new("token", 100).expect("client should build");
@@ -816,6 +967,82 @@ mod tests {
             .await
             .expect_err("evidence-free PR creation must be rejected");
         assert!(error.to_string().contains("admission evidence is required"));
+    }
+
+    #[tokio::test]
+    async fn write_boundary_rejects_evidence_for_a_mutated_candidate() {
+        let github = GitHubClient::new("token", 100).expect("client should build");
+        let mut manager = PrManager::new(&github);
+        let repository = test_repository();
+        let contribution = test_contribution();
+        let evidence = test_evidence(&contribution, &repository);
+        let mut mutated = contribution.clone();
+        mutated.changes[0].new_content = "unreviewed code".to_string();
+
+        let error = manager
+            .create_pr_with_evidence(&mutated, &repository, &evidence)
+            .await
+            .expect_err("mismatched evidence must fail before any GitHub write");
+        assert!(error.to_string().contains("fingerprint does not match"));
+    }
+
+    #[tokio::test]
+    async fn write_boundary_accepts_current_repository_consent() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/repo/contents/.github/contribai.yml"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "encoding": "base64",
+                "content": base64::engine::general_purpose::STANDARD.encode(
+                    "schema_version: 1\nenabled: true\nallowed_paths: ['src/**']\n"
+                )
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let github = GitHubClient::new("token", 100)
+            .expect("client should build")
+            .with_base_url(&server.uri());
+        let manager = PrManager::new(&github);
+        let repository = test_repository();
+        let contribution = test_contribution();
+        let evidence = test_evidence(&contribution, &repository);
+
+        manager
+            .revalidate_consent(&contribution, &repository, &evidence)
+            .await
+            .expect("unchanged consent should keep the write boundary open");
+    }
+
+    #[tokio::test]
+    async fn write_boundary_rejects_revoked_repository_consent() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/repo/contents/.github/contribai.yml"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "encoding": "base64",
+                "content": base64::engine::general_purpose::STANDARD.encode(
+                    "schema_version: 1\nenabled: false\n"
+                )
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let github = GitHubClient::new("token", 100)
+            .expect("client should build")
+            .with_base_url(&server.uri());
+        let manager = PrManager::new(&github);
+        let repository = test_repository();
+        let contribution = test_contribution();
+        let evidence = test_evidence(&contribution, &repository);
+
+        let error = manager
+            .revalidate_consent(&contribution, &repository, &evidence)
+            .await
+            .expect_err("revoked consent must close the write boundary");
+        assert!(error.to_string().contains("revoked or became invalid"));
     }
 
     #[test]

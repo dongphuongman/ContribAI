@@ -41,7 +41,9 @@ own output.
 |---|---|---|
 | Prompt injection in source or issue text | hardened prompts, untrusted-data framing, deterministic admission | model may still produce poor or misleading candidates |
 | Unsolicited PR/issue/comment volume | read-only defaults, explicit capability flags, consent, daily limits | an operator can misuse low-level credentials outside ContribAI |
-| Scope expansion | permit path/size budgets and protected paths | semantic impact can exceed line count |
+| Scope expansion | strict manifest schema, canonical paths, literal-separator globs, path/size budgets, protected paths | semantic impact can exceed line count |
+| Evidence substitution after review | full-candidate fingerprint, scope recomputation, expiry and check validation at the write boundary | a compromised local process can bypass ContribAI and call GitHub directly |
+| Consent revocation during generation/review | manifest or issue state is re-read immediately before the first write | revocation after the write workflow begins cannot undo fork artifacts |
 | TOCTOU on default branch | permit records base SHA; fork branch starts at exact SHA | upstream may advance before review, requiring rebase |
 | Duplicate non-idempotent writes | POST/PATCH retries disabled; duplicate checks and memory | network ambiguity can still require manual reconciliation |
 | Credential disclosure | redacted config debug, bounded HTTP errors, gitignored secrets | external providers receive intentionally selected context |
@@ -56,6 +58,10 @@ own output.
 Generated proposals cannot modify license, contribution policy, code of conduct, security policy,
 CODEOWNERS, funding, GitHub workflows, consent files, AI policy files, or agent instruction files.
 This prevents a candidate from changing the rules used to admit itself.
+
+Repository paths are accepted only in canonical relative POSIX form. Traversal, encoded URI
+metacharacters, ambiguous separators, duplicate targets, and unsupported deletions fail closed
+before any write-capable API call.
 
 ## Data handling
 

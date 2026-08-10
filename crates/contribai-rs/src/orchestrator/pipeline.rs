@@ -341,7 +341,7 @@ impl<'a> ContribPipeline<'a> {
 
         // External publication always requires an interactive human decision. There is
         // intentionally no pipeline API for pre-approving this gate.
-        let reviewer = HumanReviewer::new(false);
+        let reviewer = HumanReviewer::interactive();
         match reviewer
             .review_with_evidence(
                 contribution,

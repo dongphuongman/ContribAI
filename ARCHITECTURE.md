@@ -35,7 +35,8 @@ legacy reference implementation.
   protected paths, change budgets, and evidence.
 - `analysis/` treats repository text as data and builds bounded code context.
 - `generator/` creates and scores candidate changes but has no independent publication authority.
-- `pr/manager.rs` accepts an evidence capsule and creates draft pull requests only.
+- `pr/manager.rs` recomputes evidence, revalidates live maintainer consent, and creates draft pull
+  requests only.
 - `github/client.rs` centralizes GitHub I/O, retry classification, rate limits, and exact-SHA branch
   creation.
 - `orchestrator/memory.rs` stores local outcomes and short-lived working context in SQLite.
@@ -51,9 +52,10 @@ Every external contribution must satisfy all of these conditions:
    scoped consent.
 3. The target base commit SHA is captured before generation.
 4. Paths and patch size fit the repository's declared scope and built-in protected-path rules.
-5. Required validation checks pass and are recorded in an `EvidenceCapsule`.
-6. A human approves the exact candidate interactively.
-7. The branch is created from the attested SHA and the pull request is opened as a draft.
+5. Required validation checks pass and are recorded in an expiring `EvidenceCapsule`.
+6. A human reviews every proposed byte and approves the exact candidate interactively.
+7. Evidence and live maintainer consent are revalidated at the write boundary.
+8. The branch is created from the attested SHA and the pull request is opened as a draft.
 
 There is intentionally no pipeline API that pre-approves the human gate. ContribAI never signs a
 CLA on behalf of a person. Details are in [docs/CONSENT_PROTOCOL.md](docs/CONSENT_PROTOCOL.md) and

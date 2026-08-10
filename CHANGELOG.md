@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed automated CLA signing and unsolicited issue creation paths.
 - Replaced the source-available Commons Clause combination with unmodified AGPL-3.0-or-later.
 - Disabled scheduled execution by default and required authentication for non-loopback web binds.
+- Human review now renders every regular and test change without truncation, and production callers
+  can no longer construct an auto-approving review gate.
 
 ### Added
 - `contribai consent-check` for read-only, JSON-capable repository consent and base-SHA inspection.
@@ -25,6 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Threat model, governance, maintainer, code-of-conduct, and AI-contribution policies.
 - Locked multi-platform CI, RustSec audit, dependency review, OpenSSF Scorecard, release checksums,
   and GitHub artifact attestations.
+
+### Security
+- Bound evidence schema v2 to the complete reviewed candidate, its repository, exact scope, full
+  base SHA, passing checks, and permit expiry; the PR write boundary recomputes these claims.
+- Revalidate the live repository manifest or open issue approval immediately before external writes
+  so revoked or narrowed maintainer consent fails closed.
+- Reject unknown consent fields, unsupported schema versions, ambiguous/traversing/duplicate paths,
+  non-literal glob separators, abbreviated Git SHAs, and unsupported file deletions.
 
 ## [6.8.0] - 2026-04-28
 

@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 
 use chrono::{DateTime, Duration, Utc};
-use glob::Pattern;
+use glob::{MatchOptions, Pattern};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -35,6 +35,8 @@ pub const MAINTAINER_APPROVAL_LABELS: &[&str] = &[
 const DEFAULT_MAX_FILES: usize = 5;
 const DEFAULT_MAX_CHANGED_LINES: usize = 250;
 const DEFAULT_PERMIT_TTL_HOURS: i64 = 24;
+const CONSENT_SCHEMA_VERSION: u8 = 1;
+const EVIDENCE_SCHEMA_VERSION: u8 = 2;
 
 /// Source of the maintainer's consent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,10 +61,14 @@ impl RepositoryConsent {
     /// Parse the intentionally small consent manifest.
     ///
     /// A manifest is valid only when it contains `enabled: true`. Unknown fields
-    /// are ignored so the format can evolve without making older clients unsafe.
+    /// and unsupported schema versions fail closed so typos cannot widen scope.
     pub fn parse(path: &str, content: &str) -> Option<Self> {
         let manifest: ConsentManifest = serde_yaml::from_str(content).ok()?;
-        if !manifest.enabled {
+        if !manifest.enabled
+            || manifest
+                .schema_version
+                .is_some_and(|version| version != CONSENT_SCHEMA_VERSION)
+        {
             return None;
         }
         let max_files = manifest.max_files.unwrap_or(DEFAULT_MAX_FILES);
@@ -73,19 +79,30 @@ impl RepositoryConsent {
             return None;
         }
 
+        let allowed_paths = manifest.allowed_paths.into_paths();
+        if allowed_paths
+            .iter()
+            .any(|pattern| !is_safe_allow_pattern(pattern))
+        {
+            return None;
+        }
+
         Some(Self {
             source: ConsentSource::RepositoryManifest {
                 path: path.to_string(),
             },
             max_files,
             max_changed_lines,
-            allowed_paths: manifest.allowed_paths.into_paths(),
+            allowed_paths,
             draft_only: true,
         })
     }
 
     /// Construct consent from a maintainer-controlled issue label.
     pub fn from_issue(issue: &Issue) -> Option<Self> {
+        if !issue.state.eq_ignore_ascii_case("open") {
+            return None;
+        }
         let label = issue.labels.iter().find(|label| {
             MAINTAINER_APPROVAL_LABELS
                 .iter()
@@ -105,7 +122,9 @@ impl RepositoryConsent {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ConsentManifest {
+    schema_version: Option<u8>,
     #[serde(default)]
     enabled: bool,
     max_files: Option<usize>,
@@ -198,14 +217,17 @@ impl ContributionPermit {
 
     fn fingerprint(&self) -> String {
         let material = format!(
-            "v1\n{}\n{}\n{:?}\n{:?}\n{}\n{}\n{}",
+            "v2\n{}\n{}\n{:?}\n{:?}\n{:?}\n{}\n{}\n{}\n{}\n{}",
             self.repository,
             self.base_sha,
             self.source,
             self.issue,
+            self.allowed_paths,
             self.max_files,
             self.max_changed_lines,
-            self.issued_at.timestamp()
+            self.draft_only,
+            self.issued_at.timestamp(),
+            self.expires_at.timestamp()
         );
         short_sha256(material.as_bytes())
     }
@@ -218,11 +240,15 @@ pub enum AdmissionViolation {
     ExternalWritesNotEnabled,
     MissingConsent,
     MissingBaseRevision,
+    InvalidBaseRevision,
     PermitExpired,
     RepositoryMismatch,
     TooManyFiles { actual: usize, maximum: usize },
     TooManyChangedLines { actual: usize, maximum: usize },
     ProtectedPath { path: String },
+    InvalidPath { path: String, reason: String },
+    DuplicatePath { path: String },
+    UnsupportedDeletion { path: String },
     PathOutsidePermit { path: String },
 }
 
@@ -232,6 +258,7 @@ impl std::fmt::Display for AdmissionViolation {
             Self::ExternalWritesNotEnabled => write!(formatter, "external writes were not enabled"),
             Self::MissingConsent => write!(formatter, "maintainer consent was not found"),
             Self::MissingBaseRevision => write!(formatter, "base revision could not be attested"),
+            Self::InvalidBaseRevision => write!(formatter, "base revision is not a full Git SHA"),
             Self::PermitExpired => write!(formatter, "contribution permit expired"),
             Self::RepositoryMismatch => write!(formatter, "permit belongs to another repository"),
             Self::TooManyFiles { actual, maximum } => {
@@ -241,6 +268,13 @@ impl std::fmt::Display for AdmissionViolation {
                 write!(formatter, "changed {actual} lines; permit allows {maximum}")
             }
             Self::ProtectedPath { path } => write!(formatter, "protected path: {path}"),
+            Self::InvalidPath { path, reason } => {
+                write!(formatter, "invalid repository path {path:?}: {reason}")
+            }
+            Self::DuplicatePath { path } => write!(formatter, "duplicate repository path: {path}"),
+            Self::UnsupportedDeletion { path } => {
+                write!(formatter, "file deletion is not supported: {path}")
+            }
             Self::PathOutsidePermit { path } => write!(formatter, "path outside permit: {path}"),
         }
     }
@@ -282,6 +316,8 @@ impl AdmissionController {
         }
         if permit.base_sha.trim().is_empty() {
             violations.push(AdmissionViolation::MissingBaseRevision);
+        } else if !is_full_commit_sha(&permit.base_sha) {
+            violations.push(AdmissionViolation::InvalidBaseRevision);
         }
         if now > permit.expires_at {
             violations.push(AdmissionViolation::PermitExpired);
@@ -299,7 +335,22 @@ impl AdmissionController {
             });
         }
 
-        for path in &paths {
+        let mut unique_paths = BTreeSet::new();
+        for change in changes {
+            let path = &change.path;
+            if let Some(reason) = repository_path_error(path) {
+                violations.push(AdmissionViolation::InvalidPath {
+                    path: path.clone(),
+                    reason: reason.to_string(),
+                });
+                continue;
+            }
+            if !unique_paths.insert(path.clone()) {
+                violations.push(AdmissionViolation::DuplicatePath { path: path.clone() });
+            }
+            if change.is_deleted {
+                violations.push(AdmissionViolation::UnsupportedDeletion { path: path.clone() });
+            }
             if is_protected_path(path) {
                 violations.push(AdmissionViolation::ProtectedPath { path: path.clone() });
             } else if !permit.allowed_paths.is_empty()
@@ -339,6 +390,7 @@ pub struct EvidenceCapsule {
     pub base_sha: String,
     pub contribution_fingerprint: String,
     pub generated_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
     pub consent: ConsentSource,
     pub issue: Option<i64>,
     pub draft_only: bool,
@@ -346,6 +398,72 @@ pub struct EvidenceCapsule {
     pub changed_lines: usize,
     pub paths: Vec<String>,
     pub checks: Vec<EvidenceCheck>,
+}
+
+/// Stable reason why an evidence capsule cannot authorize a write.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceViolation {
+    UnsupportedSchema { actual: u8 },
+    InvalidPermitId,
+    RepositoryMismatch,
+    MissingBaseRevision,
+    InvalidBaseRevision,
+    ContributionMismatch,
+    ScopeMismatch,
+    InvalidValidityWindow,
+    Expired,
+    NotDraftOnly,
+    InvalidConsentSource,
+    MissingAdmissionCheck,
+    DuplicateCheck { name: String },
+    FailedCheck { name: String },
+    InvalidPath { path: String },
+    DuplicatePath { path: String },
+    UnsupportedDeletion { path: String },
+}
+
+impl std::fmt::Display for EvidenceViolation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedSchema { actual } => {
+                write!(formatter, "unsupported evidence schema version {actual}")
+            }
+            Self::InvalidPermitId => write!(formatter, "permit identifier is malformed"),
+            Self::RepositoryMismatch => write!(formatter, "evidence belongs to another repository"),
+            Self::MissingBaseRevision => write!(formatter, "evidence has no base revision"),
+            Self::InvalidBaseRevision => write!(formatter, "evidence base is not a full Git SHA"),
+            Self::ContributionMismatch => {
+                write!(
+                    formatter,
+                    "evidence fingerprint does not match the contribution"
+                )
+            }
+            Self::ScopeMismatch => {
+                write!(formatter, "evidence scope does not match the contribution")
+            }
+            Self::InvalidValidityWindow => {
+                write!(formatter, "evidence validity window is malformed")
+            }
+            Self::Expired => write!(formatter, "evidence capsule expired"),
+            Self::NotDraftOnly => {
+                write!(formatter, "evidence does not require a draft pull request")
+            }
+            Self::InvalidConsentSource => write!(formatter, "evidence consent source is invalid"),
+            Self::MissingAdmissionCheck => write!(formatter, "admission policy check is missing"),
+            Self::DuplicateCheck { name } => write!(formatter, "duplicate evidence check: {name}"),
+            Self::FailedCheck { name } => write!(formatter, "evidence check failed: {name}"),
+            Self::InvalidPath { path } => {
+                write!(formatter, "evidence contains invalid path: {path}")
+            }
+            Self::DuplicatePath { path } => {
+                write!(formatter, "evidence contains duplicate path: {path}")
+            }
+            Self::UnsupportedDeletion { path } => {
+                write!(formatter, "evidence contains unsupported deletion: {path}")
+            }
+        }
+    }
 }
 
 impl EvidenceCapsule {
@@ -374,12 +492,13 @@ impl EvidenceCapsule {
         );
 
         Self {
-            schema_version: 1,
+            schema_version: EVIDENCE_SCHEMA_VERSION,
             permit_id: permit.id.clone(),
             repository: permit.repository.clone(),
             base_sha: permit.base_sha.clone(),
             contribution_fingerprint: contribution_fingerprint(contribution),
             generated_at: Utc::now(),
+            expires_at: permit.expires_at,
             consent: permit.source.clone(),
             issue: permit.issue,
             draft_only: permit.draft_only,
@@ -387,6 +506,124 @@ impl EvidenceCapsule {
             changed_lines: report.changed_lines,
             paths: report.paths.clone(),
             checks,
+        }
+    }
+
+    /// Recompute every locally checkable claim before a GitHub write begins.
+    ///
+    /// This prevents a stale or unrelated capsule from being paired with a
+    /// different repository or contribution after human review.
+    pub fn validate_for_submission(
+        &self,
+        contribution: &Contribution,
+        repository: &Repository,
+        now: DateTime<Utc>,
+    ) -> std::result::Result<(), Vec<EvidenceViolation>> {
+        let mut violations = Vec::new();
+        if self.schema_version != EVIDENCE_SCHEMA_VERSION {
+            violations.push(EvidenceViolation::UnsupportedSchema {
+                actual: self.schema_version,
+            });
+        }
+        if self.permit_id.len() != 24
+            || !self.permit_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            violations.push(EvidenceViolation::InvalidPermitId);
+        }
+        if self.repository != repository.full_name {
+            violations.push(EvidenceViolation::RepositoryMismatch);
+        }
+        if self.base_sha.trim().is_empty() {
+            violations.push(EvidenceViolation::MissingBaseRevision);
+        } else if !is_full_commit_sha(&self.base_sha) {
+            violations.push(EvidenceViolation::InvalidBaseRevision);
+        }
+        if self.contribution_fingerprint != contribution_fingerprint(contribution) {
+            violations.push(EvidenceViolation::ContributionMismatch);
+        }
+        if self.expires_at <= self.generated_at {
+            violations.push(EvidenceViolation::InvalidValidityWindow);
+        } else if now > self.expires_at {
+            violations.push(EvidenceViolation::Expired);
+        }
+        if !self.draft_only {
+            violations.push(EvidenceViolation::NotDraftOnly);
+        }
+
+        let source_is_valid = match &self.consent {
+            ConsentSource::RepositoryManifest { path } => CONSENT_PATHS.contains(&path.as_str()),
+            ConsentSource::MaintainerLabel { issue, label } => {
+                self.issue == Some(*issue)
+                    && MAINTAINER_APPROVAL_LABELS
+                        .iter()
+                        .any(|allowed| label.eq_ignore_ascii_case(allowed))
+            }
+        };
+        if !source_is_valid {
+            violations.push(EvidenceViolation::InvalidConsentSource);
+        }
+
+        let changes: Vec<&FileChange> = contribution
+            .changes
+            .iter()
+            .chain(contribution.tests_added.iter())
+            .collect();
+        let paths: Vec<String> = changes.iter().map(|change| change.path.clone()).collect();
+        let changed_lines = changes
+            .iter()
+            .map(|change| changed_line_count(change))
+            .sum::<usize>();
+        if self.file_count != paths.len()
+            || self.changed_lines != changed_lines
+            || self.paths != paths
+        {
+            violations.push(EvidenceViolation::ScopeMismatch);
+        }
+
+        let mut unique_paths = BTreeSet::new();
+        for change in changes {
+            if repository_path_error(&change.path).is_some() {
+                violations.push(EvidenceViolation::InvalidPath {
+                    path: change.path.clone(),
+                });
+            }
+            if !unique_paths.insert(change.path.clone()) {
+                violations.push(EvidenceViolation::DuplicatePath {
+                    path: change.path.clone(),
+                });
+            }
+            if change.is_deleted {
+                violations.push(EvidenceViolation::UnsupportedDeletion {
+                    path: change.path.clone(),
+                });
+            }
+        }
+
+        let mut check_names = BTreeSet::new();
+        let mut has_admission_check = false;
+        for check in &self.checks {
+            if !check_names.insert(check.name.clone()) {
+                violations.push(EvidenceViolation::DuplicateCheck {
+                    name: check.name.clone(),
+                });
+            }
+            if check.name == "admission_policy" {
+                has_admission_check = true;
+            }
+            if !check.passed {
+                violations.push(EvidenceViolation::FailedCheck {
+                    name: check.name.clone(),
+                });
+            }
+        }
+        if !has_admission_check {
+            violations.push(EvidenceViolation::MissingAdmissionCheck);
+        }
+
+        if violations.is_empty() {
+            Ok(())
+        } else {
+            Err(violations)
         }
     }
 
@@ -418,6 +655,7 @@ impl EvidenceCapsule {
              - **Consent**: {}\n\
              - **Base revision**: `{}`\n\
              - **Change fingerprint**: `{}`\n\
+             - **Evidence expires**: `{}`\n\
              - **Scope**: {} files / {} changed lines\n\
              - **Submission mode**: draft only\n\n\
              {}",
@@ -425,6 +663,7 @@ impl EvidenceCapsule {
             consent,
             self.base_sha,
             self.contribution_fingerprint,
+            self.expires_at.to_rfc3339(),
             self.file_count,
             self.changed_lines,
             checks
@@ -433,22 +672,64 @@ impl EvidenceCapsule {
 }
 
 pub fn contribution_fingerprint(contribution: &Contribution) -> String {
-    let mut material = String::new();
-    material.push_str(&contribution.title);
-    material.push('\n');
-    let mut changes: Vec<&FileChange> = contribution
-        .changes
-        .iter()
-        .chain(contribution.tests_added.iter())
-        .collect();
-    changes.sort_by_key(|change| &change.path);
-    for change in changes {
-        material.push_str(&change.path);
-        material.push('\0');
-        material.push_str(&change.new_content);
-        material.push('\0');
+    let mut digest = Sha256::new();
+    hash_field(&mut digest, b"contribai-contribution-v2");
+    hash_field(
+        &mut digest,
+        format!("{:?}", contribution.contribution_type).as_bytes(),
+    );
+    hash_field(&mut digest, contribution.title.as_bytes());
+    hash_field(&mut digest, contribution.description.as_bytes());
+    hash_field(&mut digest, contribution.commit_message.as_bytes());
+    hash_field(&mut digest, contribution.branch_name.as_bytes());
+
+    let finding = &contribution.finding;
+    hash_field(
+        &mut digest,
+        format!("{:?}", finding.finding_type).as_bytes(),
+    );
+    hash_field(&mut digest, format!("{:?}", finding.severity).as_bytes());
+    hash_field(&mut digest, finding.title.as_bytes());
+    hash_field(&mut digest, finding.description.as_bytes());
+    hash_field(&mut digest, finding.file_path.as_bytes());
+    hash_field(&mut digest, format!("{:?}", finding.line_start).as_bytes());
+    hash_field(&mut digest, format!("{:?}", finding.line_end).as_bytes());
+    hash_field(&mut digest, format!("{:?}", finding.suggestion).as_bytes());
+    hash_field(&mut digest, &finding.confidence.to_bits().to_be_bytes());
+    hash_field(
+        &mut digest,
+        &(finding.priority_signals.len() as u64).to_be_bytes(),
+    );
+    for signal in &finding.priority_signals {
+        hash_field(&mut digest, signal.as_bytes());
     }
-    short_sha256(material.as_bytes())
+
+    hash_changes(&mut digest, b"changes", &contribution.changes);
+    hash_changes(&mut digest, b"tests_added", &contribution.tests_added);
+    hex::encode(digest.finalize())
+}
+
+fn hash_changes(digest: &mut Sha256, section: &[u8], changes: &[FileChange]) {
+    hash_field(digest, section);
+    hash_field(digest, &(changes.len() as u64).to_be_bytes());
+    for change in changes {
+        hash_field(digest, change.path.as_bytes());
+        match &change.original_content {
+            Some(content) => {
+                hash_field(digest, b"original:some");
+                hash_field(digest, content.as_bytes());
+            }
+            None => hash_field(digest, b"original:none"),
+        }
+        hash_field(digest, change.new_content.as_bytes());
+        hash_field(digest, &[u8::from(change.is_new_file)]);
+        hash_field(digest, &[u8::from(change.is_deleted)]);
+    }
+}
+
+fn hash_field(digest: &mut Sha256, value: &[u8]) {
+    digest.update((value.len() as u64).to_be_bytes());
+    digest.update(value);
 }
 
 pub fn changed_line_count(change: &FileChange) -> usize {
@@ -475,7 +756,7 @@ pub fn changed_line_count(change: &FileChange) -> usize {
 }
 
 pub fn is_protected_path(path: &str) -> bool {
-    let normalized = path.replace('\\', "/").to_ascii_lowercase();
+    let normalized = path.to_ascii_lowercase();
     let file_name = normalized.rsplit('/').next().unwrap_or(&normalized);
     matches!(
         file_name,
@@ -496,9 +777,61 @@ pub fn is_protected_path(path: &str) -> bool {
         || normalized == ".github/funding.yml"
 }
 
+/// Return why a generated repository path is not a canonical relative POSIX path.
+pub fn repository_path_error(path: &str) -> Option<&'static str> {
+    if path.is_empty() {
+        return Some("path is empty");
+    }
+    if path.starts_with('/') {
+        return Some("absolute paths are forbidden");
+    }
+    if path.contains('\\') {
+        return Some("backslash separators are forbidden");
+    }
+    if path.contains(['%', '?', '#']) {
+        return Some("URI metacharacters are forbidden");
+    }
+    if path.chars().any(char::is_control) {
+        return Some("control characters are forbidden");
+    }
+    if path
+        .split('/')
+        .any(|component| component.is_empty() || matches!(component, "." | ".."))
+    {
+        return Some("empty, dot, and parent components are forbidden");
+    }
+    None
+}
+
+/// GitHub currently exposes full SHA-1 object IDs and may expose SHA-256 IDs.
+pub fn is_full_commit_sha(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn is_safe_allow_pattern(pattern: &str) -> bool {
+    !pattern.is_empty()
+        && !pattern.starts_with('/')
+        && !pattern.contains('\\')
+        && !pattern.contains(['%', '?', '#'])
+        && !pattern.chars().any(char::is_control)
+        && !pattern
+            .split('/')
+            .any(|component| component.is_empty() || matches!(component, "." | ".."))
+        && Pattern::new(pattern).is_ok()
+}
+
 fn path_matches(pattern: &str, path: &str) -> bool {
     Pattern::new(pattern)
-        .map(|compiled| compiled.matches_path(std::path::Path::new(path)))
+        .map(|compiled| {
+            compiled.matches_with(
+                path,
+                MatchOptions {
+                    case_sensitive: true,
+                    require_literal_separator: true,
+                    require_literal_leading_dot: true,
+                },
+            )
+        })
         .unwrap_or(false)
 }
 
@@ -523,6 +856,8 @@ pub fn contribution_paths(contribution: &Contribution) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::core::models::{ContributionType, Finding, Severity};
+
+    const TEST_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 
     fn repository(name: &str) -> Repository {
         Repository {
@@ -630,6 +965,27 @@ mod tests {
     }
 
     #[test]
+    fn manifest_rejects_unknown_schema_fields_and_unsafe_patterns() {
+        assert!(RepositoryConsent::parse(
+            ".github/contribai.yml",
+            "schema_version: 2\nenabled: true",
+        )
+        .is_none());
+        assert!(RepositoryConsent::parse(
+            ".github/contribai.yml",
+            "schema_version: 1\nenabled: true\nmax_file: 1",
+        )
+        .is_none());
+        for pattern in ["../**", "src\\**", "src/[", "src//**"] {
+            let content = format!("schema_version: 1\nenabled: true\nallowed_paths: ['{pattern}']");
+            assert!(
+                RepositoryConsent::parse(".github/contribai.yml", &content).is_none(),
+                "unsafe pattern {pattern:?} must deny consent"
+            );
+        }
+    }
+
+    #[test]
     fn issue_consent_requires_maintainer_label() {
         let mut issue = Issue {
             number: 42,
@@ -646,13 +1002,15 @@ mod tests {
             RepositoryConsent::from_issue(&issue).map(|value| value.source),
             Some(ConsentSource::MaintainerLabel { issue: 42, .. })
         ));
+        issue.state = "closed".to_string();
+        assert!(RepositoryConsent::from_issue(&issue).is_none());
     }
 
     #[test]
     fn admission_allows_scoped_change() {
         let repo = repository("owner/repo");
         let change = contribution("src/parser.rs", Some("old\n"), "new\n");
-        let permit = ContributionPermit::issue(&repo, "abc123", consent(&["src/**"]), None);
+        let permit = ContributionPermit::issue(&repo, TEST_SHA, consent(&["src/**"]), None);
         let report = AdmissionController::evaluate(&repo, &change, &permit, Utc::now());
         assert!(report.allowed, "{:?}", report.violations);
         assert_eq!(report.changed_lines, 2);
@@ -663,7 +1021,7 @@ mod tests {
         let repo = repository("owner/repo");
         for path in ["AGENTS.md", ".github/contribai.yml"] {
             let change = contribution(path, Some("old"), "new");
-            let permit = ContributionPermit::issue(&repo, "abc123", consent(&["**"]), None);
+            let permit = ContributionPermit::issue(&repo, TEST_SHA, consent(&["**"]), None);
             let report = AdmissionController::evaluate(&repo, &change, &permit, Utc::now());
             assert!(!report.allowed, "{path} must remain protected");
             assert!(report
@@ -678,7 +1036,7 @@ mod tests {
         let repo = repository("owner/repo");
         let other = repository("other/repo");
         let change = contribution("src/lib.rs", Some("old"), "new");
-        let mut permit = ContributionPermit::issue(&other, "abc123", consent(&[]), None);
+        let mut permit = ContributionPermit::issue(&other, TEST_SHA, consent(&[]), None);
         permit.expires_at = Utc::now() - Duration::seconds(1);
         let report = AdmissionController::evaluate(&repo, &change, &permit, Utc::now());
         assert!(report
@@ -687,6 +1045,77 @@ mod tests {
         assert!(report
             .violations
             .contains(&AdmissionViolation::PermitExpired));
+    }
+
+    #[test]
+    fn admission_rejects_noncanonical_duplicate_and_deleted_paths() {
+        let repo = repository("owner/repo");
+        for path in [
+            "../SECURITY.md",
+            "src/../.github/workflows/release.yml",
+            "/src/lib.rs",
+            "src\\lib.rs",
+            "src//lib.rs",
+            "src/%2e%2e/SECURITY.md",
+        ] {
+            let change = contribution(path, Some("old"), "new");
+            let permit = ContributionPermit::issue(&repo, TEST_SHA, consent(&["**"]), None);
+            let report = AdmissionController::evaluate(&repo, &change, &permit, Utc::now());
+            assert!(
+                report
+                    .violations
+                    .iter()
+                    .any(|violation| matches!(violation, AdmissionViolation::InvalidPath { .. })),
+                "unsafe path {path:?} must be rejected: {:?}",
+                report.violations
+            );
+        }
+
+        let mut duplicate = contribution("src/lib.rs", Some("old"), "new");
+        duplicate.tests_added = duplicate.changes.clone();
+        let permit = ContributionPermit::issue(&repo, TEST_SHA, consent(&["src/**"]), None);
+        let report = AdmissionController::evaluate(&repo, &duplicate, &permit, Utc::now());
+        assert!(report
+            .violations
+            .iter()
+            .any(|violation| matches!(violation, AdmissionViolation::DuplicatePath { .. })));
+
+        let mut deletion = contribution("src/lib.rs", Some("old"), "");
+        deletion.changes[0].is_deleted = true;
+        let report = AdmissionController::evaluate(&repo, &deletion, &permit, Utc::now());
+        assert!(report
+            .violations
+            .iter()
+            .any(|violation| matches!(violation, AdmissionViolation::UnsupportedDeletion { .. })));
+    }
+
+    #[test]
+    fn allowlist_globs_do_not_cross_unmatched_directory_boundaries() {
+        let repo = repository("owner/repo");
+        let nested = contribution("src/parser/mod.rs", Some("old"), "new");
+        let shallow = ContributionPermit::issue(&repo, TEST_SHA, consent(&["src/*"]), None);
+        let recursive = ContributionPermit::issue(&repo, TEST_SHA, consent(&["src/**"]), None);
+        assert!(!AdmissionController::evaluate(&repo, &nested, &shallow, Utc::now()).allowed);
+        assert!(AdmissionController::evaluate(&repo, &nested, &recursive, Utc::now()).allowed);
+    }
+
+    #[test]
+    fn admission_requires_a_full_commit_object_id() {
+        let repo = repository("owner/repo");
+        let change = contribution("src/lib.rs", Some("old"), "new");
+        let permit = ContributionPermit::issue(&repo, "abc123", consent(&[]), None);
+        let report = AdmissionController::evaluate(&repo, &change, &permit, Utc::now());
+        assert!(report
+            .violations
+            .contains(&AdmissionViolation::InvalidBaseRevision));
+    }
+
+    #[test]
+    fn permit_identifier_binds_path_scope() {
+        let repo = repository("owner/repo");
+        let source = ContributionPermit::issue(&repo, TEST_SHA, consent(&["src/**"]), None);
+        let docs = ContributionPermit::issue(&repo, TEST_SHA, consent(&["docs/**"]), None);
+        assert_ne!(source.id, docs.id);
     }
 
     #[test]
@@ -715,12 +1144,69 @@ mod tests {
     fn evidence_markdown_discloses_consent_and_attestation() {
         let repo = repository("owner/repo");
         let change = contribution("src/lib.rs", Some("old"), "new");
-        let permit = ContributionPermit::issue(&repo, "abc123", consent(&[]), None);
+        let permit = ContributionPermit::issue(&repo, TEST_SHA, consent(&[]), None);
         let report = AdmissionController::evaluate(&repo, &change, &permit, Utc::now());
         let capsule = EvidenceCapsule::build(&change, &permit, &report, Vec::new());
         let markdown = capsule.to_markdown();
         assert!(markdown.contains(&permit.id));
-        assert!(markdown.contains("abc123"));
+        assert!(markdown.contains(TEST_SHA));
         assert!(markdown.contains("draft only"));
+    }
+
+    #[test]
+    fn evidence_validation_binds_the_exact_candidate_and_repository() {
+        let repo = repository("owner/repo");
+        let change = contribution("src/lib.rs", Some("old"), "new");
+        let permit = ContributionPermit::issue(&repo, TEST_SHA, consent(&[]), None);
+        let report = AdmissionController::evaluate(&repo, &change, &permit, Utc::now());
+        let capsule = EvidenceCapsule::build(&change, &permit, &report, Vec::new());
+        assert!(capsule
+            .validate_for_submission(&change, &repo, Utc::now())
+            .is_ok());
+
+        let mut tampered = change.clone();
+        tampered.commit_message = "chore: unrelated rewrite".to_string();
+        let violations = capsule
+            .validate_for_submission(&tampered, &repo, Utc::now())
+            .expect_err("mutated candidate must not reuse reviewed evidence");
+        assert!(violations.contains(&EvidenceViolation::ContributionMismatch));
+
+        let other = repository("other/repo");
+        let violations = capsule
+            .validate_for_submission(&change, &other, Utc::now())
+            .expect_err("cross-repository evidence must be rejected");
+        assert!(violations.contains(&EvidenceViolation::RepositoryMismatch));
+
+        let issue_permit = ContributionPermit::issue(&repo, TEST_SHA, consent(&[]), Some(42));
+        let issue_report = AdmissionController::evaluate(&repo, &change, &issue_permit, Utc::now());
+        let issue_capsule =
+            EvidenceCapsule::build(&change, &issue_permit, &issue_report, Vec::new());
+        assert!(issue_capsule
+            .validate_for_submission(&change, &repo, Utc::now())
+            .is_ok());
+    }
+
+    #[test]
+    fn evidence_validation_rejects_expired_or_failed_capsules() {
+        let repo = repository("owner/repo");
+        let change = contribution("src/lib.rs", Some("old"), "new");
+        let permit = ContributionPermit::issue(&repo, TEST_SHA, consent(&[]), None);
+        let report = AdmissionController::evaluate(&repo, &change, &permit, Utc::now());
+        let mut capsule = EvidenceCapsule::build(&change, &permit, &report, Vec::new());
+        capsule.generated_at = Utc::now() - Duration::hours(2);
+        capsule.expires_at = Utc::now() - Duration::hours(1);
+        let violations = capsule
+            .validate_for_submission(&change, &repo, Utc::now())
+            .expect_err("expired evidence must be rejected");
+        assert!(violations.contains(&EvidenceViolation::Expired));
+
+        capsule.expires_at = Utc::now() + Duration::hours(1);
+        capsule.checks[0].passed = false;
+        let violations = capsule
+            .validate_for_submission(&change, &repo, Utc::now())
+            .expect_err("failed evidence must be rejected");
+        assert!(violations.contains(&EvidenceViolation::FailedCheck {
+            name: "admission_policy".to_string(),
+        }));
     }
 }
