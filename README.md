@@ -7,9 +7,9 @@
 [![CI](https://github.com/tang-vu/ContribAI/actions/workflows/ci.yml/badge.svg)](https://github.com/tang-vu/ContribAI/actions/workflows/ci.yml)
 [![Rust](https://img.shields.io/badge/Rust-stable-f74c00?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-671%20passing-brightgreen)](#verification)
+[![Tests](https://img.shields.io/badge/tests-682%20passing-brightgreen)](#verification)
 
-[Why ContribAI](#why-contribai) · [Safety model](#safety-model) · [Quick start](#quick-start) · [Consent protocol](#consent-protocol) · [Architecture](#architecture)
+[Website](https://tang-vu.github.io/ContribAI/) · [Why ContribAI](#why-contribai) · [Safety model](#safety-model) · [Quick start](#quick-start) · [Consent protocol](#consent-protocol) · [Architecture](#architecture)
 
 </div>
 
@@ -17,6 +17,9 @@ ContribAI analyzes repositories and prepares small, reviewable changes. It does 
 public repository as permission to write. Submission is a separate capability that must be enabled
 by the operator, authorized by the target maintainer, bounded by policy, reviewed by a human, and
 published as a draft pull request with an evidence receipt.
+
+The [project website](https://tang-vu.github.io/ContribAI/) is a dependency-free introduction and
+read-only onboarding path. It is informational only and exposes no ContribAI runtime capability.
 
 ```text
 public code ≠ permission to submit
@@ -237,6 +240,7 @@ The main Rust modules are:
 - `pr/` — evidence-required draft lifecycle and patrol
 - `mcp/` — capability-aware MCP surface
 - `web/` — local dashboard and authenticated remote API surface
+- `site/` — static public onboarding; no runtime API, analytics, cookies, or external dependencies
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for implementation details.
 
@@ -261,9 +265,11 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo build --workspace --release
+node scripts/check-site.mjs
+node --check site/app.js
 ```
 
-The current workspace runs **671 passing tests** plus one intentionally ignored doctest.
+The current workspace runs **682 passing tests** plus one intentionally ignored doctest.
 
 ## Project policy
 

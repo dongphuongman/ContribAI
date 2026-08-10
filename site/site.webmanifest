@@ -1,0 +1,17 @@
+{
+  "name": "ContribAI",
+  "short_name": "ContribAI",
+  "description": "Maintainer-governed admission and evidence for AI-assisted open source contributions.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f5f0e6",
+  "theme_color": "#101714",
+  "icons": [
+    {
+      "src": "./favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}

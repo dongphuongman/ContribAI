@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   can no longer construct an auto-approving review gate.
 
 ### Added
+- Dependency-free public landing page with maintainer and contributor onboarding, a no-tracker
+  content security policy, static contract checks, and a least-privilege GitHub Pages workflow.
 - `contribai consent-check` for read-only, JSON-capable repository consent and base-SHA inspection.
 - Canonical `.github/contribai.yml` manifests with YAML-list path allowlists; legacy consent marker
   paths remain readable.

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title id="title">ContribAI</title>
+  <rect width="64" height="64" rx="14" fill="#101714"/>
+  <path d="M32 8 54 20.5v23L32 56 10 43.5v-23Z" fill="none" stroke="#e9f56a" stroke-width="5" stroke-linejoin="round"/>
+  <path d="m21 32 8 8 15-18" fill="none" stroke="#f5f0e6" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

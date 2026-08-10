@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="title desc">
+  <title id="title">ContribAI — generation is not admission</title>
+  <desc id="desc">Maintainer-governed admission and evidence for AI-assisted open source contributions.</desc>
+  <rect width="1200" height="630" fill="#101714"/>
+  <path d="M0 82h1200M0 548h1200" stroke="#31423a"/>
+  <path d="M84 0v630M1116 0v630" stroke="#31423a"/>
+  <g transform="translate(88 74)">
+    <path d="M35 0 66 18v36L35 72 4 54V18Z" fill="none" stroke="#e9f56a" stroke-width="5" stroke-linejoin="round"/>
+    <path d="m20 35 11 11 21-25" fill="none" stroke="#f5f0e6" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="88" y="49" fill="#f5f0e6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="34" font-weight="700">ContribAI</text>
+    <rect x="314" y="18" width="70" height="35" rx="17.5" fill="#e9f56a"/>
+    <text x="349" y="42" text-anchor="middle" fill="#101714" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16" font-weight="800">OSS</text>
+  </g>
+  <text x="88" y="274" fill="#f5f0e6" font-family="Inter, Arial, sans-serif" font-size="72" font-weight="750" letter-spacing="-2">Generation is not admission.</text>
+  <text x="88" y="354" fill="#a9c2b5" font-family="Inter, Arial, sans-serif" font-size="31">AI can write the patch. Maintainers set the terms.</text>
+  <g transform="translate(88 434)" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18" font-weight="700">
+    <rect width="270" height="56" rx="28" fill="#e9f56a"/>
+    <text x="135" y="35" text-anchor="middle" fill="#101714">READ-ONLY DEFAULT</text>
+    <rect x="290" width="210" height="56" rx="28" fill="none" stroke="#668073" stroke-width="2"/>
+    <text x="395" y="35" text-anchor="middle" fill="#f5f0e6">DRAFTS ONLY</text>
+    <rect x="520" width="300" height="56" rx="28" fill="none" stroke="#668073" stroke-width="2"/>
+    <text x="670" y="35" text-anchor="middle" fill="#f5f0e6">EVIDENCE-BOUND</text>
+  </g>
+</svg>

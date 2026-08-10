@@ -1,0 +1,444 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; base-uri 'none'; connect-src 'none'; font-src 'self'; form-action 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self'"
+    >
+    <title>ContribAI — Maintainer-governed AI contributions</title>
+    <meta
+      name="description"
+      content="ContribAI turns AI-generated patches into consent-bound, evidence-backed draft proposals that maintainers can actually review."
+    >
+    <meta name="theme-color" content="#101714">
+    <meta name="color-scheme" content="light dark">
+    <link rel="canonical" href="https://tang-vu.github.io/ContribAI/">
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml">
+    <link rel="manifest" href="./site.webmanifest">
+    <link rel="stylesheet" href="./styles.css">
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="ContribAI — Generation is not admission">
+    <meta
+      property="og:description"
+      content="Maintainer consent, deterministic admission, exact human review, and evidence-backed draft PRs for AI-assisted open source contributions."
+    >
+    <meta property="og:url" content="https://tang-vu.github.io/ContribAI/">
+    <meta property="og:image" content="https://tang-vu.github.io/ContribAI/social-card.svg">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="ContribAI — Generation is not admission">
+    <meta
+      name="twitter:description"
+      content="A maintainer-governed admission and evidence layer for AI-assisted open source contributions."
+    >
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <header class="site-header">
+      <div class="shell nav-shell">
+        <a class="brand" href="#top" aria-label="ContribAI home">
+          <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true" focusable="false">
+            <path d="M20 3 34 11v18L20 37 6 29V11Z"></path>
+            <path d="m13 20 5 5 10-11"></path>
+          </svg>
+          <span>ContribAI</span>
+          <span class="brand-tag">OSS</span>
+        </a>
+
+        <nav class="desktop-nav" aria-label="Primary navigation">
+          <a href="#why">Why</a>
+          <a href="#protocol">Protocol</a>
+          <a href="#quickstart">Quick start</a>
+          <a href="#maintainers">Maintainers</a>
+          <a href="#faq">FAQ</a>
+        </nav>
+
+        <a class="button button-small button-ink" href="https://github.com/tang-vu/ContribAI">
+          View GitHub
+          <span aria-hidden="true">↗</span>
+        </a>
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="hero" id="top" aria-labelledby="hero-title">
+        <div class="hero-grid shell">
+          <div class="hero-copy">
+            <p class="eyebrow"><span class="status-dot"></span> Maintainer-governed by design</p>
+            <h1 id="hero-title">AI can write the patch.<br><em>Maintainers set the terms.</em></h1>
+            <p class="hero-lede">
+              ContribAI separates code generation from permission to publish. It prepares small,
+              reviewable changes, then requires explicit consent, deterministic policy checks,
+              exact human review, and an auditable evidence receipt before any draft proposal.
+            </p>
+            <div class="hero-actions">
+              <a class="button button-primary" href="#quickstart">Start read-only</a>
+              <a class="button button-ghost" href="https://github.com/tang-vu/ContribAI#readme">
+                Read the docs <span aria-hidden="true">→</span>
+              </a>
+            </div>
+            <ul class="hero-proof" aria-label="Core guarantees">
+              <li><span aria-hidden="true">✓</span> Read-only default</li>
+              <li><span aria-hidden="true">✓</span> Draft PRs only</li>
+              <li><span aria-hidden="true">✓</span> AGPL-3.0-or-later</li>
+            </ul>
+          </div>
+
+          <div class="hero-console" aria-label="Example ContribAI consent inspection">
+            <div class="console-bar">
+              <div class="console-dots" aria-hidden="true"><i></i><i></i><i></i></div>
+              <span>consent-check · read only</span>
+              <span class="console-safe">NO WRITES</span>
+            </div>
+            <div class="console-body">
+              <p><span class="prompt">$</span> contribai consent-check tang-vu/ContribAI</p>
+              <div class="console-output">
+                <p><span class="muted">Repository</span> tang-vu/ContribAI</p>
+                <p><span class="muted">Consent</span> <span class="ok">FOUND</span></p>
+                <p><span class="muted">Source</span> .github/contribai.yml</p>
+                <p><span class="muted">Budget</span> 4 files / 180 changed lines</p>
+                <p><span class="muted">Base SHA</span> 7a93c4d1f802b6e…</p>
+                <p><span class="muted">Gate</span> <span class="ok">READY</span></p>
+              </div>
+              <div class="console-rule"></div>
+              <p><span class="prompt">$</span> contribai analyze https://github.com/owner/repo</p>
+              <p class="console-note">Analysis is local-first. Submission capability remains off.</p>
+            </div>
+            <div class="permit-card" aria-hidden="true">
+              <span>EvidenceCapsule / v2</span>
+              <strong>candidate: 1b78d9…</strong>
+              <small>repo + base + scope + checks + expiry</small>
+            </div>
+          </div>
+        </div>
+
+        <div class="shell invariant-strip" aria-label="Product invariants">
+          <p><strong>public code</strong> ≠ permission to submit</p>
+          <p><strong>generation</strong> ≠ admission</p>
+          <p><strong>passing checks</strong> ≠ maintainer approval</p>
+        </div>
+      </section>
+
+      <section class="section section-paper" id="why" aria-labelledby="why-title">
+        <div class="shell">
+          <div class="section-heading split-heading">
+            <div>
+              <p class="eyebrow">The missing layer</p>
+              <h2 id="why-title">Generation got cheap.<br>Review did not.</h2>
+            </div>
+            <p>
+              Most coding agents optimize for output volume. Open source needs a different
+              optimization target: maintainer intent, bounded review cost, and evidence that can be
+              checked independently of the model that wrote the patch.
+            </p>
+          </div>
+
+          <div class="comparison-grid">
+            <article class="comparison-card comparison-before">
+              <p class="card-label">Typical agent loop</p>
+              <h3>Generate → submit → ask forgiveness</h3>
+              <ul>
+                <li>Public visibility treated as implied permission</li>
+                <li>Model decides whether its own output is safe</li>
+                <li>Large or unrelated changes reach maintainers</li>
+                <li>Verification cost is shifted upstream</li>
+              </ul>
+            </article>
+            <article class="comparison-card comparison-after">
+              <p class="card-label">ContribAI protocol</p>
+              <h3>Consent → bound → verify → review</h3>
+              <ul>
+                <li>Maintainer manifest or approved issue required</li>
+                <li>Deterministic policy sits outside the LLM</li>
+                <li>Paths, size, base revision, and time are bounded</li>
+                <li>Human sees the exact candidate before a draft</li>
+              </ul>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section section-dark" id="protocol" aria-labelledby="protocol-title">
+        <div class="shell">
+          <div class="section-heading centered-heading">
+            <p class="eyebrow eyebrow-light">The admission protocol</p>
+            <h2 id="protocol-title">Seven gates. One safe default.</h2>
+            <p>Any missing, stale, malformed, or failed gate closes the write path.</p>
+          </div>
+
+          <ol class="protocol-flow">
+            <li>
+              <span class="step-number">01</span>
+              <div><strong>Operator intent</strong><small><code>--submit</code> explicitly enables the capability.</small></div>
+            </li>
+            <li>
+              <span class="step-number">02</span>
+              <div><strong>Maintainer consent</strong><small>Repository manifest or approved open issue.</small></div>
+            </li>
+            <li>
+              <span class="step-number">03</span>
+              <div><strong>Bound permit</strong><small>Repository, full base SHA, scope, budget, and expiry.</small></div>
+            </li>
+            <li>
+              <span class="step-number">04</span>
+              <div><strong>Deterministic checks</strong><small>Protected paths, risk, quality, and validation.</small></div>
+            </li>
+            <li>
+              <span class="step-number">05</span>
+              <div><strong>Exact human review</strong><small>Every proposed byte and evidence check is rendered.</small></div>
+            </li>
+            <li>
+              <span class="step-number">06</span>
+              <div><strong>Live revalidation</strong><small>Evidence and current consent are checked again.</small></div>
+            </li>
+            <li>
+              <span class="step-number">07</span>
+              <div><strong>Draft proposal</strong><small>Never merge, publish as ready, or sign a CLA.</small></div>
+            </li>
+          </ol>
+
+          <div class="evidence-panel">
+            <div class="evidence-copy">
+              <p class="card-label">Inspectable by people and policy engines</p>
+              <h3>Evidence over confidence.</h3>
+              <p>
+                The capsule binds the reviewed candidate to its repository, consent source, exact
+                base revision, changed paths, scope totals, checks, and permit expiry. A mismatched
+                or expired capsule cannot authorize the write boundary.
+              </p>
+              <a class="text-link" href="https://github.com/tang-vu/ContribAI/blob/main/docs/CONSENT_PROTOCOL.md">
+                Read the consent protocol <span aria-hidden="true">→</span>
+              </a>
+            </div>
+            <pre class="evidence-code" aria-label="Example evidence capsule"><code><span class="code-dim">schema</span>      evidence/v2
+<span class="code-dim">permit</span>      5f81b87f23a6…
+<span class="code-dim">consent</span>     manifest:.github/contribai.yml
+<span class="code-dim">base</span>        7a93c4d1f802b6e5c2f54968bd42676b751faf09
+<span class="code-dim">candidate</span>   1b78d9b56a3e…
+<span class="code-dim">scope</span>       2 files / 37 changed lines
+<span class="code-dim">checks</span>      <span class="code-ok">admission ✓ quality ✓ validation ✓</span>
+<span class="code-dim">mode</span>        draft_only
+<span class="code-dim">expires</span>     2026-08-11T08:00:00Z</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <section class="section section-mint" id="quickstart" aria-labelledby="quickstart-title">
+        <div class="shell quickstart-grid">
+          <div class="quickstart-copy">
+            <p class="eyebrow">Try it safely</p>
+            <h2 id="quickstart-title">Useful before it can write.</h2>
+            <p>
+              Inspect repository consent and analyze a target without granting submission
+              capability. Read-only is the default, not a special demo mode.
+            </p>
+            <div class="requirements">
+              <span>Rust binary</span><span>GitHub token</span><span>Your LLM provider</span>
+            </div>
+          </div>
+
+          <div class="steps-stack">
+            <article class="command-step">
+              <div class="command-meta"><span>1</span><strong>Install</strong></div>
+              <div class="command-box">
+                <code id="install-command">curl -fsSL https://raw.githubusercontent.com/tang-vu/ContribAI/main/install.sh | sh</code>
+                <button class="copy-button" type="button" data-copy="install-command" aria-label="Copy install command">Copy</button>
+              </div>
+              <details>
+                <summary>Windows PowerShell or build from source</summary>
+                <div class="details-code">
+                  <code>irm https://raw.githubusercontent.com/tang-vu/ContribAI/main/install.ps1 | iex</code>
+                  <code>cargo install --git https://github.com/tang-vu/ContribAI --locked</code>
+                </div>
+              </details>
+            </article>
+
+            <article class="command-step">
+              <div class="command-meta"><span>2</span><strong>Configure locally</strong></div>
+              <div class="command-box">
+                <code id="init-command">contribai init</code>
+                <button class="copy-button" type="button" data-copy="init-command" aria-label="Copy init command">Copy</button>
+              </div>
+              <p>Secrets stay in environment variables or your local ignored config.</p>
+            </article>
+
+            <article class="command-step">
+              <div class="command-meta"><span>3</span><strong>Inspect, then analyze</strong></div>
+              <div class="command-box command-box-multiline">
+                <code id="inspect-command">contribai consent-check tang-vu/ContribAI --json --require-consent
+contribai analyze https://github.com/owner/repo</code>
+                <button class="copy-button" type="button" data-copy="inspect-command" aria-label="Copy inspection commands">Copy</button>
+              </div>
+              <p>No <code>--submit</code>, no external proposal.</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section section-paper" id="maintainers" aria-labelledby="maintainers-title">
+        <div class="shell">
+          <div class="section-heading split-heading">
+            <div>
+              <p class="eyebrow">Two accountable roles</p>
+              <h2 id="maintainers-title">Control for maintainers.<br>Clarity for contributors.</h2>
+            </div>
+            <p>
+              ContribAI does not invent a new social contract. It makes repository intent explicit
+              and machine-checkable while leaving acceptance entirely with the maintainer.
+            </p>
+          </div>
+
+          <div class="role-grid">
+            <article class="role-card role-maintainer">
+              <div class="role-icon" aria-hidden="true">M</div>
+              <p class="card-label">For maintainers</p>
+              <h3>Set a review budget in the repo.</h3>
+              <p>Opt in narrowly, constrain paths and size, or approve one issue at a time.</p>
+              <pre><code>schema_version: 1
+enabled: true
+max_files: 3
+max_changed_lines: 120
+allowed_paths:
+  - src/**
+  - tests/**</code></pre>
+              <ul class="check-list">
+                <li>Remove or disable the manifest to revoke</li>
+                <li>Protected governance paths stay blocked</li>
+                <li>Every resulting pull request remains a draft</li>
+              </ul>
+            </article>
+
+            <article class="role-card role-contributor">
+              <div class="role-icon" aria-hidden="true">C</div>
+              <p class="card-label">For accountable contributors</p>
+              <h3>Prepare less work, with better evidence.</h3>
+              <p>Analyze first, keep candidates bounded, and ask a human before publication.</p>
+              <ol class="role-sequence">
+                <li><span>01</span><div><strong>Discover context</strong><small>AST, repository guidance, issue scope</small></div></li>
+                <li><span>02</span><div><strong>Generate candidate</strong><small>No independent write authority</small></div></li>
+                <li><span>03</span><div><strong>Validate locally</strong><small>Risk, quality, tests, protected paths</small></div></li>
+                <li><span>04</span><div><strong>Review exact output</strong><small>Human approval cannot be delegated</small></div></li>
+              </ol>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section section-grid" id="capabilities" aria-labelledby="capabilities-title">
+        <div class="shell">
+          <div class="section-heading centered-heading">
+            <p class="eyebrow">Built for real repositories</p>
+            <h2 id="capabilities-title">Useful analysis. Boring authority.</h2>
+            <p>The intelligence can evolve. The authorization boundary stays deterministic.</p>
+          </div>
+          <div class="feature-grid">
+            <article><span>AST</span><h3>13-language parsing</h3><p>Tree-sitter intelligence, symbols, imports, and cross-file context.</p></article>
+            <article><span>LLM</span><h3>Provider choice</h3><p>Gemini, OpenAI, Anthropic, Ollama, Vertex AI, and Copilot routing.</p></article>
+            <article><span>VAL</span><h3>Layered validation</h3><p>Local, AST, or Docker checks with explicit isolation disclosure.</p></article>
+            <article><span>MEM</span><h3>Outcome memory</h3><p>SQLite history and repository preferences without remote control-plane lock-in.</p></article>
+            <article><span>CLI</span><h3>CLI, TUI, and MCP</h3><p>Multiple interfaces sharing the same capability-aware boundaries.</p></article>
+            <article><span>OBS</span><h3>Inspectable operations</h3><p>Events, quotas, circuit breaking, dashboard, and evidence receipts.</p></article>
+          </div>
+          <div class="not-for-banner">
+            <strong>Deliberately not included:</strong>
+            bulk unsolicited PRs, auto-merge, automated CLA signing, hidden MCP PR creation, or
+            model-decided authorization.
+          </div>
+        </div>
+      </section>
+
+      <section class="section section-paper" id="faq" aria-labelledby="faq-title">
+        <div class="shell faq-grid">
+          <div class="faq-heading">
+            <p class="eyebrow">Questions worth asking</p>
+            <h2 id="faq-title">Before you give an agent a token.</h2>
+            <p>ContribAI assumes generated output is untrusted—even when the model sounds certain.</p>
+          </div>
+          <div class="faq-list">
+            <details open>
+              <summary>Does ContribAI submit pull requests automatically?</summary>
+              <p>
+                No. External writes are off by default. Submission additionally requires operator
+                intent, maintainer consent, admission checks, exact human approval, and live
+                revalidation. The result is always a draft pull request.
+              </p>
+            </details>
+            <details>
+              <summary>Can public repositories be analyzed?</summary>
+              <p>
+                Yes, subject to provider terms and local configuration. Analysis is not permission
+                to publish. A separate maintainer-controlled gate governs external proposals.
+              </p>
+            </details>
+            <details>
+              <summary>Can maintainers revoke consent?</summary>
+              <p>
+                Yes. Remove or disable the repository manifest, remove the approval label, or close
+                the approved issue. Current consent is re-read before the first write.
+              </p>
+            </details>
+            <details>
+              <summary>Does the evidence capsule prove CI passed?</summary>
+              <p>
+                No. It is a deterministic local audit receipt, not a remote signature or CI
+                attestation. The protocol states that limitation explicitly.
+              </p>
+            </details>
+            <details>
+              <summary>Why AGPL?</summary>
+              <p>
+                The maintained Rust implementation is free and open source under
+                AGPL-3.0-or-later. Network modifications remain available to their users under the
+                license terms.
+              </p>
+            </details>
+          </div>
+        </div>
+      </section>
+
+      <section class="final-cta" aria-labelledby="cta-title">
+        <div class="shell cta-inner">
+          <p class="eyebrow eyebrow-light">Start with observation, not authority</p>
+          <h2 id="cta-title">Analyze the repo.<br>Keep the write gate closed.</h2>
+          <p>Install ContribAI, inspect a consent manifest, and run your first read-only analysis.</p>
+          <div class="hero-actions cta-actions">
+            <a class="button button-primary" href="#quickstart">Try read-only</a>
+            <a class="button button-dark-ghost" href="https://github.com/tang-vu/ContribAI">
+              Star or contribute on GitHub <span aria-hidden="true">↗</span>
+            </a>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="shell footer-grid">
+        <div>
+          <a class="brand footer-brand" href="#top">
+            <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true" focusable="false">
+              <path d="M20 3 34 11v18L20 37 6 29V11Z"></path>
+              <path d="m13 20 5 5 10-11"></path>
+            </svg>
+            <span>ContribAI</span>
+          </a>
+          <p>Maintainer-governed admission and evidence for AI-assisted open source contributions.</p>
+        </div>
+        <div class="footer-links">
+          <div><strong>Project</strong><a href="https://github.com/tang-vu/ContribAI">Repository</a><a href="https://github.com/tang-vu/ContribAI/releases">Releases</a><a href="https://github.com/tang-vu/ContribAI/blob/main/CHANGELOG.md">Changelog</a></div>
+          <div><strong>Policy</strong><a href="https://github.com/tang-vu/ContribAI/blob/main/docs/CONSENT_PROTOCOL.md">Consent protocol</a><a href="https://github.com/tang-vu/ContribAI/blob/main/docs/THREAT_MODEL.md">Threat model</a><a href="https://github.com/tang-vu/ContribAI/security/policy">Security</a></div>
+          <div><strong>Community</strong><a href="https://github.com/tang-vu/ContribAI/blob/main/CONTRIBUTING.md">Contributing</a><a href="https://github.com/tang-vu/ContribAI/issues">Issues</a><a href="https://github.com/tang-vu/ContribAI/blob/main/CODE_OF_CONDUCT.md">Code of conduct</a></div>
+        </div>
+      </div>
+      <div class="shell footer-bottom">
+        <span>AGPL-3.0-or-later</span>
+        <span>No analytics. No trackers. No cookies.</span>
+        <span>Built in the open.</span>
+      </div>
+    </footer>
+
+    <div class="copy-status" role="status" aria-live="polite"></div>
+    <script src="./app.js" defer></script>
+  </body>
+</html>

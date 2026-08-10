@@ -4,6 +4,9 @@ ContribAI is a maintainer-governed agent for producing evidence-backed contribut
 Start with these documents:
 
 - [Project README](../README.md) — installation, safe defaults, and operator workflow
+- [Project website](https://tang-vu.github.io/ContribAI/) — concise public introduction and
+  read-only onboarding
+- [Website maintenance](WEBSITE.md) — local preview, contract checks, and deployment
 - [Architecture](../ARCHITECTURE.md) — components and trust boundaries
 - [Consent protocol](CONSENT_PROTOCOL.md) — repository opt-in and issue-scoped approval
 - [Threat model](THREAT_MODEL.md) — assets, adversaries, mitigations, and residual risk
