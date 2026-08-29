@@ -9,7 +9,7 @@
 [![License](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-686%20passing-brightgreen)](#verification)
 
-[Website](https://tang-vu.github.io/ContribAI/) · [Why ContribAI](#why-contribai) · [Safety model](#safety-model) · [Quick start](#quick-start) · [Consent protocol](#consent-protocol) · [Architecture](#architecture)
+[Website](https://contribai-topaz.vercel.app/) · [Deploy website](#deploy-the-public-website) · [Why ContribAI](#why-contribai) · [Safety model](#safety-model) · [Quick start](#quick-start) · [Consent protocol](#consent-protocol) · [Architecture](#architecture)
 
 </div>
 
@@ -18,8 +18,17 @@ public repository as permission to write. Submission is a separate capability th
 by the operator, authorized by the target maintainer, bounded by policy, reviewed by a human, and
 published as a draft pull request with an evidence receipt.
 
-The [project website](https://tang-vu.github.io/ContribAI/) is a dependency-free introduction and
+The [project website](https://contribai-topaz.vercel.app/) is a dependency-free introduction and
 read-only onboarding path. It is informational only and exposes no ContribAI runtime capability.
+
+### Deploy the public website
+
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Ftang-vu%2FContribAI)
+
+The Vercel deployment serves only the static files under `site/`. It needs no environment
+variables, tokens, functions, or access to the credential-bearing Rust runtime. Project
+maintainers should follow the [existing-repository deployment guide](docs/VERCEL_DEPLOYMENT.md)
+instead of cloning the repository through the button.
 
 ```text
 public code ≠ permission to submit

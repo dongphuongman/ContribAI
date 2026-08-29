@@ -1,6 +1,6 @@
 # Project website
 
-The public website at <https://tang-vu.github.io/ContribAI/> is an onboarding surface for
+The public website at <https://contribai-topaz.vercel.app/> is an onboarding surface for
 maintainers and contributors. It explains the admission model and points people toward read-only
 commands before they consider granting submission capability. It is not the authenticated local
 dashboard under `crates/contribai-rs/src/web/` and cannot operate a ContribAI runtime.
@@ -38,11 +38,22 @@ of core safety claims.
 
 ## Deployment
 
+The repository supports two static hosting targets. Both publish the same `site/` directory and
+neither exposes the Rust dashboard, credentials, or an API:
+
+- `vercel.json` configures a framework-free Vercel deployment with security response headers;
+- `.github/workflows/pages.yml` keeps the existing GitHub Pages deployment available.
+
+See [Vercel deployment](VERCEL_DEPLOYMENT.md) for the production setup and post-deployment checks.
+The stable Vercel production alias is canonical. GitHub Pages remains an independently deployed
+fallback for the same static content.
+
 `.github/workflows/pages.yml` validates pull requests and deploys `site/` from `main`. All actions
 are pinned to full commit SHAs. The validation job has read-only repository access; only the deploy
 job receives `pages: write` and OIDC token permissions.
 
 The repository's Pages source must be set to **GitHub Actions**. A new deployment runs when the
-site, its contract check, or the Pages workflow changes. If the public URL changes, update the
-canonical and Open Graph URLs in `site/index.html`, plus `site/robots.txt`, `site/sitemap.xml`, and
+site, its hosting configuration, its contract check, or the Pages workflow changes. If the public
+URL changes, update the canonical and Open Graph URLs in `site/index.html`, plus
+`site/robots.txt`, `site/sitemap.xml`, `README.md`, `docs/README.md`, `docs/WEBSITE.md`, and
 `scripts/check-site.mjs` in the same commit.

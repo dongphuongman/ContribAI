@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://tang-vu.github.io/ContribAI/sitemap.xml
+Sitemap: https://contribai-topaz.vercel.app/sitemap.xml

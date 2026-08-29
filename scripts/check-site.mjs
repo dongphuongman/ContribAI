@@ -5,7 +5,9 @@ import { fileURLToPath } from "node:url";
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = dirname(scriptDirectory);
 const siteRoot = join(repositoryRoot, "site");
-const canonicalUrl = "https://tang-vu.github.io/ContribAI/";
+const canonicalUrl = "https://contribai-topaz.vercel.app/";
+const deployUrl =
+  "https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Ftang-vu%2FContribAI";
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -38,6 +40,8 @@ try {
   for (const file of requiredFiles) readSiteFile(file);
 
   const html = readSiteFile("index.html");
+  const readme = readFileSync(join(repositoryRoot, "README.md"), "utf8");
+  const vercel = JSON.parse(readFileSync(join(repositoryRoot, "vercel.json"), "utf8"));
   assert(/^<!doctype html>/i.test(html), "index.html must declare an HTML5 doctype");
   assert(/<html\s+lang="en">/i.test(html), "index.html must declare its language");
   assert(/<meta\s+name="viewport"/i.test(html), "index.html must include a viewport");
@@ -48,6 +52,32 @@ try {
   assert(!/<script(?![^>]*\bsrc=)[^>]*>/i.test(html), "Inline scripts are not allowed");
   assert(!/<style(?:\s|>)/i.test(html), "Inline stylesheets are not allowed");
   assert(!/\son[a-z]+\s*=/i.test(html), "Inline event handlers are not allowed");
+
+  assert(vercel.framework === null, "Vercel must use the framework-free static preset");
+  assert(vercel.outputDirectory === "site", "Vercel must publish only site/");
+  for (const forbiddenCapability of ["builds", "env", "functions", "rewrites"]) {
+    assert(!(forbiddenCapability in vercel), `Vercel must not expose ${forbiddenCapability}`);
+  }
+  const catchAllHeaders = vercel.headers?.find((entry) => entry.source === "/(.*)")?.headers ?? [];
+  const responseHeaders = new Map(
+    catchAllHeaders.map(({ key, value }) => [key.toLowerCase(), value])
+  );
+  const requiredResponseHeaders = [
+    "content-security-policy",
+    "cross-origin-opener-policy",
+    "permissions-policy",
+    "referrer-policy",
+    "x-content-type-options",
+    "x-frame-options",
+  ];
+  for (const header of requiredResponseHeaders) {
+    assert(responseHeaders.has(header), `Vercel security header is missing: ${header}`);
+  }
+  assert(
+    responseHeaders.get("content-security-policy").includes("frame-ancestors 'none'"),
+    "Vercel CSP must block framing"
+  );
+  assert(readme.includes(`](${deployUrl})`), "README Vercel Deploy Button is missing or stale");
 
   const ids = collect(/\bid="([^"]+)"/g, html);
   const duplicateIds = ids.filter((id, index) => ids.indexOf(id) !== index);
@@ -107,7 +137,9 @@ try {
   assert(readSiteFile("favicon.svg").includes("<svg"), "Favicon is not SVG");
   assert(readSiteFile("social-card.svg").includes("<svg"), "Social card is not SVG");
 
-  console.log(`Static site contract passed (${requiredFiles.length} files, ${ids.length} unique IDs).`);
+  console.log(
+    `Static site contract passed (${requiredFiles.length} files, ${ids.length} unique IDs, Vercel static-only).`
+  );
 } catch (error) {
   console.error(`Static site contract failed: ${error.message}`);
   process.exitCode = 1;

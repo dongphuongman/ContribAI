@@ -4,10 +4,12 @@ ContribAI is a maintainer-governed agent for producing evidence-backed contribut
 Start with these documents:
 
 - [Project README](../README.md) — installation, safe defaults, and operator workflow
-- [Project website](https://tang-vu.github.io/ContribAI/) — concise public introduction and
+- [Project website](https://contribai-topaz.vercel.app/) — concise public introduction and
   read-only onboarding
 - [Five-minute walkthrough](QUICKSTART.md) — offline policy proof before credentials or network
 - [Website maintenance](WEBSITE.md) — local preview, contract checks, and deployment
+- [Vercel deployment](VERCEL_DEPLOYMENT.md) — static hosting boundary and production setup
+- [Vercel OSS application](VERCEL_OSS_APPLICATION.md) — evidence-backed application worksheet
 - [Architecture](../ARCHITECTURE.md) — components and trust boundaries
 - [Consent protocol](CONSENT_PROTOCOL.md) — repository opt-in and issue-scoped approval
 - [Threat model](THREAT_MODEL.md) — assets, adversaries, mitigations, and residual risk

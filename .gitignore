@@ -23,6 +23,7 @@ env/
 # Config with secrets
 config.yaml
 .env
+.env*.local
 
 # SQLite / database files (never commit these)
 *.db
@@ -50,6 +51,9 @@ logs/
 # Rust build artifacts
 /target/
 # This repository ships an application, so Cargo.lock is committed for reproducible builds.
+
+# Local Vercel project linkage
+.vercel/
 
 # Release binaries (built locally)
 contribai-*.exe

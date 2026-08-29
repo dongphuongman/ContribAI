@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Added a static-only Vercel deployment for the public onboarding site, including security response
+  headers, deployment checks, maintainer setup documentation, and an evidence-backed Vercel OSS
+  Program application worksheet.
+
 ## [6.9.0] - 2026-08-10
 
 ### Changed
