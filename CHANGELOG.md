@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   headers, deployment checks, maintainer setup documentation, and an evidence-backed Vercel OSS
   Program application worksheet.
 
+### Security
+- Updated `h2` to 0.4.16 for RUSTSEC-2026-0258 and replaced the yanked `chacha20` 0.10.1 lockfile
+  entry with 0.10.2.
+
 ## [6.9.0] - 2026-08-10
 
 ### Changed
