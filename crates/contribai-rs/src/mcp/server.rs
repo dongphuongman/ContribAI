@@ -17,6 +17,7 @@
 //! - check_duplicate_pr
 //! - check_ai_policy
 //! - get_stats
+//! - list_admission_audit
 //! - patrol_prs
 //! - cleanup_forks
 //! - add_pr_review_comment
@@ -31,6 +32,7 @@ use std::io::{self, Write};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tracing::{error, info};
 
+use crate::core::admission::AdmissionAuditDecision;
 use crate::github::client::GitHubClient;
 use crate::orchestrator::memory::Memory;
 
@@ -261,6 +263,18 @@ fn tool_definitions(allow_writes: bool) -> Vec<ToolDef> {
             input_schema: json!({
                 "type": "object",
                 "properties": {}
+            }),
+        },
+        ToolDef {
+            name: "list_admission_audit".into(),
+            description: "Read and verify the local admission decision audit trail".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "repository": {"type": "string", "description": "Optional exact owner/repository filter"},
+                    "decision": {"type": "string", "enum": ["approved", "blocked", "rejected", "skipped", "error"]},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 20}
+                }
             }),
         },
         ToolDef {
@@ -588,6 +602,28 @@ async fn handle_tool_call(
             Ok(json!(stats))
         }
 
+        "list_admission_audit" => {
+            let repository = args["repository"]
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let decision = args["decision"]
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            if decision.is_some_and(|value| !AdmissionAuditDecision::is_valid_filter(value)) {
+                anyhow::bail!("'decision' must be approved, blocked, rejected, skipped, or error");
+            }
+            let limit = args["limit"].as_u64().unwrap_or(20).clamp(1, 1000) as usize;
+            let chain = memory.verify_admission_audit_chain()?;
+            let records = memory.get_admission_audits(repository, decision, limit)?;
+            Ok(json!({
+                "schema_version": 1,
+                "chain": chain,
+                "records": records,
+            }))
+        }
+
         "close_pr" => {
             let owner = require_str("owner")?;
             let repo = require_str("repo")?;
@@ -870,7 +906,7 @@ mod tests {
     fn read_only_tools_exclude_every_mutation() {
         let tools = tool_definitions(false);
         let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
-        assert_eq!(tools.len(), 12);
+        assert_eq!(tools.len(), 13);
         assert!(MUTATING_TOOLS.iter().all(|name| !names.contains(name)));
         assert!(names.contains(&"search_repos"), "missing search_repos");
         assert!(names.contains(&"get_repo_info"), "missing get_repo_info");
@@ -884,6 +920,10 @@ mod tests {
             "missing get_open_issues"
         );
         assert!(names.contains(&"get_stats"), "missing get_stats");
+        assert!(
+            names.contains(&"list_admission_audit"),
+            "missing list_admission_audit"
+        );
         assert!(
             names.contains(&"check_duplicate_pr"),
             "missing check_duplicate_pr"
@@ -907,7 +947,7 @@ mod tests {
     #[test]
     fn explicit_write_mode_never_delegates_pr_creation_or_cla_signing() {
         let names = advertised_tool_names(true);
-        assert_eq!(names.len(), 19);
+        assert_eq!(names.len(), 20);
         assert!(!names.contains(&"create_pr".to_string()));
         assert!(!names.contains(&"sign_cla".to_string()));
     }

@@ -19,8 +19,9 @@ fn test_mcp_server_module_exists() {
 fn test_mcp_tools_list_count() {
     let read_only = contribai::mcp::server::advertised_tool_names(false);
     let write_enabled = contribai::mcp::server::advertised_tool_names(true);
-    assert_eq!(read_only.len(), 12);
-    assert_eq!(write_enabled.len(), 19);
+    assert_eq!(read_only.len(), 13);
+    assert_eq!(write_enabled.len(), 20);
+    assert!(read_only.contains(&"list_admission_audit".to_string()));
     assert!(!read_only.contains(&"create_pr".to_string()));
     assert!(!write_enabled.contains(&"create_pr".to_string()));
     assert!(!write_enabled.contains(&"sign_cla".to_string()));

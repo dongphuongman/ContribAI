@@ -25,6 +25,7 @@ use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
+use crate::core::admission::AdmissionAuditDecision;
 use crate::core::config::ContribAIConfig;
 use crate::orchestrator::memory::Memory;
 
@@ -135,6 +136,14 @@ fn default_limit() -> usize {
 #[derive(Deserialize)]
 pub struct PrFilterParams {
     status: Option<String>,
+    #[serde(default = "default_limit")]
+    limit: usize,
+}
+
+#[derive(Deserialize)]
+struct AdmissionFilterParams {
+    repository: Option<String>,
+    decision: Option<String>,
     #[serde(default = "default_limit")]
     limit: usize,
 }
@@ -268,6 +277,42 @@ pub async fn get_prs(
     Json(json_prs)
 }
 
+/// GET /api/admissions — access-controlled, read-only admission decision history.
+async fn get_admissions(
+    headers: HeaderMap,
+    Query(query): Query<ApiKeyQuery>,
+    State(state): State<AppState>,
+    Query(params): Query<AdmissionFilterParams>,
+) -> Result<Json<Value>, StatusCode> {
+    verify_api_key(&headers, query.api_key.as_deref(), &state.api_keys)?;
+    let decision = params
+        .decision
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if decision.is_some_and(|value| !AdmissionAuditDecision::is_valid_filter(value)) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let repository = params
+        .repository
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let chain = state
+        .memory
+        .verify_admission_audit_chain()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let records = state
+        .memory
+        .get_admission_audits(repository, decision, params.limit)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({
+        "schema_version": 1,
+        "chain": chain,
+        "records": records,
+    })))
+}
+
 /// GET /api/runs?limit=20
 pub async fn get_runs(
     State(state): State<AppState>,
@@ -299,6 +344,7 @@ pub async fn get_runs(
 /// - `contribai_errors_total` — Total errors across all runs
 /// - `contribai_cache_entries_total` — LLM cache entries
 /// - `contribai_circuit_breaker_state` — Circuit breaker state (0=Closed, 1=Open, 2=HalfOpen)
+/// - `contribai_admission_decisions_total` — Admission decisions by terminal result
 pub async fn get_metrics(State(state): State<AppState>) -> impl IntoResponse {
     let stats = state.memory.get_stats().unwrap_or_default();
     let cache_stats = get_cache_stats();
@@ -308,6 +354,11 @@ pub async fn get_metrics(State(state): State<AppState>) -> impl IntoResponse {
     let findings = stats.get("total_findings").unwrap_or(&0);
     let errors = stats.get("total_errors").unwrap_or(&0);
     let runs = stats.get("total_runs").unwrap_or(&0);
+    let admission_approved = stats.get("admission_approved_total").unwrap_or(&0);
+    let admission_blocked = stats.get("admission_blocked_total").unwrap_or(&0);
+    let admission_rejected = stats.get("admission_rejected_total").unwrap_or(&0);
+    let admission_skipped = stats.get("admission_skipped_total").unwrap_or(&0);
+    let admission_errors = stats.get("admission_error_total").unwrap_or(&0);
 
     let metrics = format!(
         "# HELP contribai_pipeline_runs_total Total pipeline runs.\n\
@@ -330,13 +381,25 @@ pub async fn get_metrics(State(state): State<AppState>) -> impl IntoResponse {
          contribai_cache_entries_total {}\n\n\
          # HELP contribai_circuit_breaker_state Circuit breaker state (0=Closed, 1=Open, 2=HalfOpen).\n\
          # TYPE contribai_circuit_breaker_state gauge\n\
-         contribai_circuit_breaker_state 0\n",
+         contribai_circuit_breaker_state 0\n\n\
+         # HELP contribai_admission_decisions_total Terminal admission decisions by result.\n\
+         # TYPE contribai_admission_decisions_total counter\n\
+         contribai_admission_decisions_total{{decision=\"approved\"}} {}\n\
+         contribai_admission_decisions_total{{decision=\"blocked\"}} {}\n\
+         contribai_admission_decisions_total{{decision=\"rejected\"}} {}\n\
+         contribai_admission_decisions_total{{decision=\"skipped\"}} {}\n\
+         contribai_admission_decisions_total{{decision=\"error\"}} {}\n",
         runs,
         prs_submitted,
         prs_merged,
         findings,
         errors,
         cache_stats.valid_entries,
+        admission_approved,
+        admission_blocked,
+        admission_rejected,
+        admission_skipped,
+        admission_errors,
     );
 
     (
@@ -492,6 +555,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/prs", get(get_prs))
         .route("/api/runs", get(get_runs))
         .route("/metrics", get(get_metrics))
+        // Local audit metadata follows the loopback/API-key policy because paths may be private.
+        .route("/api/admissions", get(get_admissions))
         // Pipeline API routes (protected)
         .route("/api/run", post(trigger_run))
         .route("/api/run/target", post(trigger_target))
@@ -924,5 +989,49 @@ mod tests {
             message: "test".into(),
         };
         assert_eq!(r.status, "not_implemented");
+    }
+
+    #[tokio::test]
+    async fn admission_audit_endpoint_requires_configured_api_key() {
+        let state = AppState {
+            memory: Arc::new(Memory::open_in_memory().unwrap()),
+            version: crate::VERSION,
+            api_keys: vec!["secret".to_string()],
+            webhook_secret: None,
+        };
+        let result = get_admissions(
+            HeaderMap::new(),
+            Query(ApiKeyQuery { api_key: None }),
+            State(state),
+            Query(AdmissionFilterParams {
+                repository: None,
+                decision: None,
+                limit: 20,
+            }),
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn admission_audit_endpoint_rejects_unknown_decision_filter() {
+        let state = AppState {
+            memory: Arc::new(Memory::open_in_memory().unwrap()),
+            version: crate::VERSION,
+            api_keys: Vec::new(),
+            webhook_secret: None,
+        };
+        let result = get_admissions(
+            HeaderMap::new(),
+            Query(ApiKeyQuery { api_key: None }),
+            State(state),
+            Query(AdmissionFilterParams {
+                repository: None,
+                decision: Some("allowed".to_string()),
+                limit: 20,
+            }),
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), StatusCode::BAD_REQUEST);
     }
 }

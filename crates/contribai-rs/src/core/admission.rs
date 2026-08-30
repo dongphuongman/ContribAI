@@ -37,6 +37,7 @@ const DEFAULT_MAX_CHANGED_LINES: usize = 250;
 const DEFAULT_PERMIT_TTL_HOURS: i64 = 24;
 const CONSENT_SCHEMA_VERSION: u8 = 1;
 const EVIDENCE_SCHEMA_VERSION: u8 = 2;
+const ADMISSION_AUDIT_SCHEMA_VERSION: u8 = 1;
 
 /// Source of the maintainer's consent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -379,6 +380,206 @@ pub struct EvidenceCheck {
     pub name: String,
     pub passed: bool,
     pub details: String,
+}
+
+/// Pipeline boundary at which an admission attempt reached a terminal decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmissionAuditStage {
+    Capability,
+    Permission,
+    Consent,
+    BaseRevision,
+    Evidence,
+    Admission,
+    HumanReview,
+}
+
+impl AdmissionAuditStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Capability => "capability",
+            Self::Permission => "permission",
+            Self::Consent => "consent",
+            Self::BaseRevision => "base_revision",
+            Self::Evidence => "evidence",
+            Self::Admission => "admission",
+            Self::HumanReview => "human_review",
+        }
+    }
+}
+
+/// Terminal result of one admission attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmissionAuditDecision {
+    Approved,
+    Blocked,
+    Rejected,
+    Skipped,
+    Error,
+}
+
+impl AdmissionAuditDecision {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Approved => "approved",
+            Self::Blocked => "blocked",
+            Self::Rejected => "rejected",
+            Self::Skipped => "skipped",
+            Self::Error => "error",
+        }
+    }
+
+    pub fn is_valid_filter(value: &str) -> bool {
+        matches!(
+            value,
+            "approved" | "blocked" | "rejected" | "skipped" | "error"
+        )
+    }
+}
+
+/// Content-minimized, integrity-checkable record of an admission decision.
+///
+/// The record stores candidate metadata and hashes, never generated file contents. Receipts are
+/// linked to the preceding local record. This detects accidental edits and broken ordering when
+/// the complete local chain is verified; it is not a signature or remote attestation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmissionAuditRecord {
+    pub schema_version: u8,
+    pub receipt: String,
+    pub previous_receipt: Option<String>,
+    pub repository: String,
+    pub contribution_fingerprint: String,
+    pub stage: AdmissionAuditStage,
+    pub decision: AdmissionAuditDecision,
+    pub reason: String,
+    pub base_sha: Option<String>,
+    pub permit_id: Option<String>,
+    pub issue: Option<i64>,
+    pub file_count: usize,
+    pub changed_lines: usize,
+    pub paths: Vec<String>,
+    pub violations: Vec<AdmissionViolation>,
+    pub checks: Vec<EvidenceCheck>,
+    pub recorded_at: DateTime<Utc>,
+}
+
+#[derive(Serialize)]
+struct AdmissionAuditMaterial<'a> {
+    schema_version: u8,
+    previous_receipt: &'a Option<String>,
+    repository: &'a str,
+    contribution_fingerprint: &'a str,
+    stage: AdmissionAuditStage,
+    decision: AdmissionAuditDecision,
+    reason: &'a str,
+    base_sha: &'a Option<String>,
+    permit_id: &'a Option<String>,
+    issue: Option<i64>,
+    file_count: usize,
+    changed_lines: usize,
+    paths: &'a [String],
+    violations: &'a [AdmissionViolation],
+    checks: &'a [EvidenceCheck],
+    recorded_at: DateTime<Utc>,
+}
+
+impl AdmissionAuditRecord {
+    /// Build an unsealed record for the local audit store.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_attempt(
+        repository: &Repository,
+        contribution: &Contribution,
+        stage: AdmissionAuditStage,
+        decision: AdmissionAuditDecision,
+        reason: impl Into<String>,
+        permit: Option<&ContributionPermit>,
+        report: Option<&AdmissionReport>,
+        checks: Vec<EvidenceCheck>,
+        recorded_at: DateTime<Utc>,
+    ) -> Self {
+        let changes: Vec<&FileChange> = contribution
+            .changes
+            .iter()
+            .chain(contribution.tests_added.iter())
+            .collect();
+        Self {
+            schema_version: ADMISSION_AUDIT_SCHEMA_VERSION,
+            receipt: String::new(),
+            previous_receipt: None,
+            repository: repository.full_name.clone(),
+            contribution_fingerprint: contribution_fingerprint(contribution),
+            stage,
+            decision,
+            reason: reason.into(),
+            base_sha: permit.map(|value| value.base_sha.clone()),
+            permit_id: permit.map(|value| value.id.clone()),
+            issue: permit.and_then(|value| value.issue),
+            file_count: changes.len(),
+            changed_lines: changes
+                .iter()
+                .map(|change| changed_line_count(change))
+                .sum(),
+            paths: changes.iter().map(|change| change.path.clone()).collect(),
+            violations: report
+                .map(|value| value.violations.clone())
+                .unwrap_or_default(),
+            checks,
+            recorded_at,
+        }
+    }
+
+    /// Bind this record to the preceding receipt and calculate its SHA-256 receipt.
+    pub fn seal(
+        mut self,
+        previous_receipt: Option<String>,
+    ) -> std::result::Result<Self, serde_json::Error> {
+        self.previous_receipt = previous_receipt;
+        self.receipt = self.calculate_receipt()?;
+        Ok(self)
+    }
+
+    /// Recompute the record receipt from its stored fields.
+    pub fn verify_receipt(&self) -> bool {
+        self.schema_version == ADMISSION_AUDIT_SCHEMA_VERSION
+            && self.receipt.len() == 64
+            && self.receipt.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && self
+                .calculate_receipt()
+                .is_ok_and(|expected| expected == self.receipt)
+    }
+
+    fn calculate_receipt(&self) -> std::result::Result<String, serde_json::Error> {
+        let material = AdmissionAuditMaterial {
+            schema_version: self.schema_version,
+            previous_receipt: &self.previous_receipt,
+            repository: &self.repository,
+            contribution_fingerprint: &self.contribution_fingerprint,
+            stage: self.stage,
+            decision: self.decision,
+            reason: &self.reason,
+            base_sha: &self.base_sha,
+            permit_id: &self.permit_id,
+            issue: self.issue,
+            file_count: self.file_count,
+            changed_lines: self.changed_lines,
+            paths: &self.paths,
+            violations: &self.violations,
+            checks: &self.checks,
+            recorded_at: self.recorded_at,
+        };
+        let encoded = serde_json::to_vec(&material)?;
+        Ok(hex::encode(Sha256::digest(encoded)))
+    }
+}
+
+/// Result of checking the complete local admission audit chain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmissionAuditVerification {
+    pub valid: bool,
+    pub records_checked: usize,
+    pub first_invalid_receipt: Option<String>,
 }
 
 /// Audit artifact attached to every admitted draft PR.
@@ -1208,5 +1409,59 @@ mod tests {
         assert!(violations.contains(&EvidenceViolation::FailedCheck {
             name: "admission_policy".to_string(),
         }));
+    }
+
+    #[test]
+    fn admission_audit_receipt_binds_decision_and_predecessor() {
+        let repo = repository("owner/repo");
+        let change = contribution("src/lib.rs", Some("old"), "new");
+        let permit = ContributionPermit::issue(&repo, TEST_SHA, consent(&[]), None);
+        let report = AdmissionController::evaluate(&repo, &change, &permit, Utc::now());
+        let recorded_at = Utc::now();
+        let record = AdmissionAuditRecord::from_attempt(
+            &repo,
+            &change,
+            AdmissionAuditStage::Admission,
+            AdmissionAuditDecision::Approved,
+            "admission and review passed",
+            Some(&permit),
+            Some(&report),
+            Vec::new(),
+            recorded_at,
+        )
+        .seal(Some("a".repeat(64)))
+        .expect("audit record should serialize");
+        assert!(record.verify_receipt());
+
+        let mut changed_decision = record.clone();
+        changed_decision.decision = AdmissionAuditDecision::Blocked;
+        assert!(!changed_decision.verify_receipt());
+
+        let mut changed_predecessor = record;
+        changed_predecessor.previous_receipt = None;
+        assert!(!changed_predecessor.verify_receipt());
+    }
+
+    #[test]
+    fn admission_audit_stores_metadata_without_file_contents() {
+        let repo = repository("owner/repo");
+        let change = contribution("src/lib.rs", Some("private old"), "private new");
+        let record = AdmissionAuditRecord::from_attempt(
+            &repo,
+            &change,
+            AdmissionAuditStage::Consent,
+            AdmissionAuditDecision::Blocked,
+            "maintainer consent was not found",
+            None,
+            None,
+            Vec::new(),
+            Utc::now(),
+        )
+        .seal(None)
+        .expect("audit record should serialize");
+        let json = serde_json::to_string(&record).expect("audit record should serialize");
+        assert!(json.contains("src/lib.rs"));
+        assert!(!json.contains("private old"));
+        assert!(!json.contains("private new"));
     }
 }

@@ -11,6 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added a static-only Vercel deployment for the public onboarding site, including security response
   headers, deployment checks, maintainer setup documentation, and an evidence-backed Vercel OSS
   Program application worksheet.
+- Added an append-only local admission audit ledger with SHA-256-linked receipts for approved,
+  blocked, rejected, skipped, and failed admission attempts. The ledger stores candidate hashes
+  and scope metadata, never generated file contents.
+- Added `contribai admissions` with repository/decision filters, JSON output, and full-chain
+  verification; added the protected read-only `/api/admissions` endpoint and the read-only MCP
+  `list_admission_audit` tool.
+- Added Prometheus admission decision counters by terminal result.
+
+### Changed
+- Approved submissions now fail closed if their admission decision cannot be persisted to the local
+  audit ledger.
 
 ### Security
 - Updated `h2` to 0.4.16 for RUSTSEC-2026-0258 and replaced the yanked `chacha20` 0.10.1 lockfile

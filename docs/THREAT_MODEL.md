@@ -43,6 +43,7 @@ own output.
 | Unsolicited PR/issue/comment volume | read-only defaults, explicit capability flags, consent, daily limits | an operator can misuse low-level credentials outside ContribAI |
 | Scope expansion | strict manifest schema, canonical paths, literal-separator globs, path/size budgets, protected paths | semantic impact can exceed line count |
 | Evidence substitution after review | full-candidate fingerprint, scope recomputation, expiry and check validation at the write boundary | a compromised local process can bypass ContribAI and call GitHub directly |
+| Admission history mutation | content-minimized append-only records, SHA-256 receipts linked in order, full-chain verification | receipts are unsigned; an attacker controlling the database and all retained checkpoints can replace the whole chain |
 | Consent revocation during generation/review | manifest or issue state is re-read immediately before the first write | revocation after the write workflow begins cannot undo fork artifacts |
 | TOCTOU on default branch | permit records base SHA; fork branch starts at exact SHA | upstream may advance before review, requiring rebase |
 | Duplicate non-idempotent writes | POST/PATCH retries disabled; duplicate checks and memory | network ambiguity can still require manual reconciliation |
@@ -70,8 +71,10 @@ provider. Operators are responsible for provider terms, retention settings, geog
 and authorization to process private code. Local Ollama mode can reduce external disclosure but does
 not remove local execution or model-supply-chain risk.
 
-Persistent local data includes repository analysis, PR outcomes, working memory, caches, and event
-logs. Operators should protect the ContribAI data directory as they would source-code metadata.
+Persistent local data includes repository analysis, PR outcomes, admission audit metadata, working
+memory, caches, and event logs. Admission records exclude generated file contents but include
+repository names and changed paths. Operators should protect the ContribAI data directory as they
+would source-code metadata.
 
 ## Out of scope assumptions
 

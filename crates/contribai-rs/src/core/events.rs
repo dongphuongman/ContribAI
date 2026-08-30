@@ -26,6 +26,8 @@ pub enum EventType {
     // Generation
     GenerationStart,
     GenerationComplete,
+    // Admission
+    AdmissionDecision,
     // PR lifecycle
     PrCreated,
     PrClosed,
@@ -54,6 +56,7 @@ impl fmt::Display for EventType {
             Self::AnalysisComplete => "analysis.complete",
             Self::GenerationStart => "generation.start",
             Self::GenerationComplete => "generation.complete",
+            Self::AdmissionDecision => "admission.decision",
             Self::PrCreated => "pr.created",
             Self::PrClosed => "pr.closed",
             Self::PrMerged => "pr.merged",
@@ -280,6 +283,10 @@ mod tests {
     #[test]
     fn test_event_type_display() {
         assert_eq!(EventType::PipelineStart.to_string(), "pipeline.start");
+        assert_eq!(
+            EventType::AdmissionDecision.to_string(),
+            "admission.decision"
+        );
         assert_eq!(EventType::PrCreated.to_string(), "pr.created");
         assert_eq!(EventType::HuntRoundStart.to_string(), "hunt.round_start");
     }

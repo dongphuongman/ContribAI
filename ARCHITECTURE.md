@@ -39,7 +39,8 @@ legacy reference implementation.
   requests only.
 - `github/client.rs` centralizes GitHub I/O, retry classification, rate limits, and exact-SHA branch
   creation.
-- `orchestrator/memory.rs` stores local outcomes and short-lived working context in SQLite.
+- `orchestrator/memory.rs` stores local outcomes, short-lived working context, and integrity-linked
+  admission decision receipts in SQLite.
 - `web/` is an observability API. It does not claim to queue runs; public binds require an API key.
 - `mcp/` exposes tools over stdio with read-only defaults.
 - `cli/commands/demo.rs` exercises the production consent, admission, and evidence policy against
@@ -58,8 +59,16 @@ Every external contribution must satisfy all of these conditions:
 4. Paths and patch size fit the repository's declared scope and built-in protected-path rules.
 5. Required validation checks pass and are recorded in an expiring `EvidenceCapsule`.
 6. A human reviews every proposed byte and approves the exact candidate interactively.
-7. Evidence and live maintainer consent are revalidated at the write boundary.
-8. The branch is created from the attested SHA and the pull request is opened as a draft.
+7. The terminal decision is appended to the local audit ledger; an approval that cannot be recorded
+   fails closed.
+8. Evidence and live maintainer consent are revalidated at the write boundary.
+9. The branch is created from the attested SHA and the pull request is opened as a draft.
+
+Blocked attempts are recorded at the capability, permission, consent, base-revision, evidence, or
+admission boundary. Human rejection, skip, approval, and review errors are recorded separately. The
+ledger contains hashes and scope metadata rather than generated file contents. Its linked receipts
+detect accidental local mutation and ordering breaks, but are not signatures and do not protect
+against an attacker who can replace the entire database and every external checkpoint.
 
 There is intentionally no pipeline API that pre-approves the human gate. ContribAI never signs a
 CLA on behalf of a person. Details are in [docs/CONSENT_PROTOCOL.md](docs/CONSENT_PROTOCOL.md) and

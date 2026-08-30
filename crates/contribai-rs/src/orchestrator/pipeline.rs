@@ -11,8 +11,9 @@ use tracing::{debug, info, warn};
 use crate::analysis::analyzer::CodeAnalyzer;
 use crate::analysis::compressor::ContextCompressor;
 use crate::core::admission::{
-    discover_repository_consent, AdmissionController, ContributionPermit, EvidenceCapsule,
-    EvidenceCheck, RepositoryConsent,
+    discover_repository_consent, AdmissionAuditDecision, AdmissionAuditRecord, AdmissionAuditStage,
+    AdmissionController, AdmissionReport, ContributionPermit, EvidenceCapsule, EvidenceCheck,
+    RepositoryConsent,
 };
 use crate::core::config::ContribAIConfig;
 use crate::core::error::Result;
@@ -269,6 +270,49 @@ impl<'a> ContribPipeline<'a> {
             .filter(|sha| !sha.is_empty())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn record_admission_decision(
+        &self,
+        repo: &Repository,
+        contribution: &Contribution,
+        stage: AdmissionAuditStage,
+        decision: AdmissionAuditDecision,
+        reason: &str,
+        permit: Option<&ContributionPermit>,
+        report: Option<&AdmissionReport>,
+        checks: &[EvidenceCheck],
+    ) -> bool {
+        let record = AdmissionAuditRecord::from_attempt(
+            repo,
+            contribution,
+            stage,
+            decision,
+            reason,
+            permit,
+            report,
+            checks.to_vec(),
+            chrono::Utc::now(),
+        );
+        match self.memory.record_admission_audit(record) {
+            Ok(record) => {
+                self.event_bus
+                    .emit(
+                        Event::new(EventType::AdmissionDecision, "pipeline.admission")
+                            .with_data("repo", repo.full_name.as_str())
+                            .with_data("decision", decision.as_str())
+                            .with_data("stage", stage.as_str())
+                            .with_data("receipt", record.receipt.as_str()),
+                    )
+                    .await;
+                true
+            }
+            Err(error) => {
+                warn!(repo = %repo.full_name, %error, "Admission audit persistence failed");
+                false
+            }
+        }
+    }
+
     async fn admit_contribution(
         &self,
         repo: &Repository,
@@ -278,6 +322,17 @@ impl<'a> ContribPipeline<'a> {
         checks: Vec<EvidenceCheck>,
     ) -> Option<EvidenceCapsule> {
         if !self.external_writes_enabled {
+            self.record_admission_decision(
+                repo,
+                contribution,
+                AdmissionAuditStage::Capability,
+                AdmissionAuditDecision::Blocked,
+                "external write capability was not explicitly enabled",
+                None,
+                None,
+                &checks,
+            )
+            .await;
             warn!(
                 repo = %repo.full_name,
                 "Submission blocked: external write capability was not explicitly enabled"
@@ -292,11 +347,33 @@ impl<'a> ContribPipeline<'a> {
             .evaluate(&repo.full_name)
             == PermissionAction::Deny
         {
+            self.record_admission_decision(
+                repo,
+                contribution,
+                AdmissionAuditStage::Permission,
+                AdmissionAuditDecision::Blocked,
+                "pr_create permission policy denied this repository",
+                None,
+                None,
+                &checks,
+            )
+            .await;
             warn!(repo = %repo.full_name, "Submission blocked by pr_create permission policy");
             return None;
         }
 
         let Some(consent) = consent else {
+            self.record_admission_decision(
+                repo,
+                contribution,
+                AdmissionAuditStage::Consent,
+                AdmissionAuditDecision::Blocked,
+                "no repository opt-in or maintainer approval label was found",
+                None,
+                None,
+                &checks,
+            )
+            .await;
             warn!(
                 repo = %repo.full_name,
                 "Submission blocked: no repository opt-in or maintainer approval label"
@@ -304,6 +381,17 @@ impl<'a> ContribPipeline<'a> {
             return None;
         };
         let Some(base_sha) = self.base_revision(repo).await else {
+            self.record_admission_decision(
+                repo,
+                contribution,
+                AdmissionAuditStage::BaseRevision,
+                AdmissionAuditDecision::Blocked,
+                "the default branch revision could not be attested",
+                None,
+                None,
+                &checks,
+            )
+            .await;
             warn!(
                 repo = %repo.full_name,
                 branch = %repo.default_branch,
@@ -320,6 +408,18 @@ impl<'a> ContribPipeline<'a> {
             .map(|check| check.name.as_str())
             .collect();
         if !failed_checks.is_empty() {
+            let reason = format!("failed evidence checks: {}", failed_checks.join(", "));
+            self.record_admission_decision(
+                repo,
+                contribution,
+                AdmissionAuditStage::Evidence,
+                AdmissionAuditDecision::Blocked,
+                &reason,
+                Some(&permit),
+                Some(&report),
+                &checks,
+            )
+            .await;
             warn!(
                 repo = %repo.full_name,
                 permit = %permit.id,
@@ -330,6 +430,23 @@ impl<'a> ContribPipeline<'a> {
         }
         let evidence = EvidenceCapsule::build(contribution, &permit, &report, checks);
         if !report.allowed {
+            let reason = report
+                .violations
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ");
+            self.record_admission_decision(
+                repo,
+                contribution,
+                AdmissionAuditStage::Admission,
+                AdmissionAuditDecision::Blocked,
+                &reason,
+                Some(&permit),
+                Some(&report),
+                &evidence.checks,
+            )
+            .await;
             warn!(
                 repo = %repo.full_name,
                 permit = %permit.id,
@@ -351,8 +468,51 @@ impl<'a> ContribPipeline<'a> {
             )
             .await
         {
-            Ok(decision) if decision.is_approved() => Some(evidence),
+            Ok(decision) if decision.is_approved() => {
+                let persisted = self
+                    .record_admission_decision(
+                        repo,
+                        contribution,
+                        AdmissionAuditStage::HumanReview,
+                        AdmissionAuditDecision::Approved,
+                        decision
+                            .reason
+                            .as_deref()
+                            .unwrap_or("human approved exact candidate"),
+                        Some(&permit),
+                        Some(&report),
+                        &evidence.checks,
+                    )
+                    .await;
+                if persisted {
+                    Some(evidence)
+                } else {
+                    warn!(repo = %repo.full_name, "Submission blocked because its admission audit could not be persisted");
+                    None
+                }
+            }
             Ok(decision) => {
+                let audit_decision = if decision.is_rejected() {
+                    AdmissionAuditDecision::Rejected
+                } else {
+                    AdmissionAuditDecision::Skipped
+                };
+                let default_reason = if decision.is_rejected() {
+                    "human rejected exact candidate"
+                } else {
+                    "human skipped exact candidate"
+                };
+                self.record_admission_decision(
+                    repo,
+                    contribution,
+                    AdmissionAuditStage::HumanReview,
+                    audit_decision,
+                    decision.reason.as_deref().unwrap_or(default_reason),
+                    Some(&permit),
+                    Some(&report),
+                    &evidence.checks,
+                )
+                .await;
                 info!(
                     repo = %repo.full_name,
                     action = ?decision.action,
@@ -361,6 +521,17 @@ impl<'a> ContribPipeline<'a> {
                 None
             }
             Err(error) => {
+                self.record_admission_decision(
+                    repo,
+                    contribution,
+                    AdmissionAuditStage::HumanReview,
+                    AdmissionAuditDecision::Error,
+                    &format!("human review failed closed: {error}"),
+                    Some(&permit),
+                    Some(&report),
+                    &evidence.checks,
+                )
+                .await;
                 warn!(repo = %repo.full_name, %error, "Human review gate failed closed");
                 None
             }

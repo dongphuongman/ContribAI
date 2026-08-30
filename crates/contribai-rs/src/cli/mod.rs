@@ -91,6 +91,29 @@ mod capability_tests {
             })
         ));
     }
+
+    #[test]
+    fn admissions_is_read_only_and_supports_machine_filters() {
+        let cli = Cli::try_parse_from([
+            "contribai",
+            "admissions",
+            "--repository",
+            "owner/repo",
+            "--decision",
+            "blocked",
+            "--json",
+        ])
+        .expect("valid CLI");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Admissions {
+                repository: Some(repository),
+                decision: Some(decision),
+                json: true,
+                ..
+            }) if repository == "owner/repo" && decision == "blocked"
+        ));
+    }
 }
 
 #[derive(Subcommand)]
@@ -270,6 +293,25 @@ enum Commands {
         /// Max number of PRs to show
         #[arg(short, long, default_value = "20")]
         limit: usize,
+    },
+
+    /// Inspect and verify the local admission decision audit trail
+    Admissions {
+        /// Filter by exact owner/repository name
+        #[arg(short, long)]
+        repository: Option<String>,
+
+        /// Filter by decision: approved, blocked, rejected, skipped, or error
+        #[arg(short, long)]
+        decision: Option<String>,
+
+        /// Maximum records to display
+        #[arg(short, long, default_value = "20")]
+        limit: usize,
+
+        /// Emit a machine-readable report with full-chain verification status
+        #[arg(long)]
+        json: bool,
     },
 
     /// Show current configuration
@@ -525,6 +567,18 @@ impl Cli {
             Commands::Status { filter, limit } => {
                 commands::status::run_status(self.config.as_deref(), filter, limit).await
             }
+            Commands::Admissions {
+                repository,
+                decision,
+                limit,
+                json,
+            } => commands::admissions::run_admissions(
+                self.config.as_deref(),
+                repository.as_deref(),
+                decision.as_deref(),
+                limit,
+                json,
+            ),
             Commands::Version => {
                 print_banner();
                 println!("contribai {} (Rust)", contribai::VERSION);

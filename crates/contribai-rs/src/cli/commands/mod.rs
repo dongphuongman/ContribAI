@@ -1,5 +1,6 @@
 //! CLI command handlers — each subcommand has its own module.
 
+pub mod admissions;
 pub mod analyze;
 pub mod cache_clear;
 pub mod cache_stats;

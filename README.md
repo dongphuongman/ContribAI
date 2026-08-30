@@ -220,6 +220,20 @@ failed, cross-repository, scope-mismatched, or fingerprint-mismatched capsules a
 maintainer consent. It remains a local audit receipt, not a substitute for CI, code review,
 provenance attestation, or maintainer judgment.
 
+Every terminal admission attempt is also appended to the local admission audit ledger. Records
+contain the candidate fingerprint, permit/base SHA when available, scope, checks, decision stage,
+and reason—never generated file contents. Each record's SHA-256 receipt binds the preceding receipt,
+so accidental edits or broken ordering are detectable when the complete local chain is verified:
+
+```bash
+contribai admissions
+contribai admissions --repository owner/repo --decision blocked
+contribai admissions --json
+```
+
+The hash chain is a local integrity check, not a signature or remote attestation. An approved
+submission fails closed if its audit decision cannot be persisted.
+
 ## Capabilities
 
 - Tree-sitter analysis for 13 languages, with additional fallback language mappings
@@ -231,6 +245,8 @@ provenance attestation, or maintainer judgment.
 - Ratatui interface, read-only-by-default MCP server, and authenticated web dashboard
 - Draft PR lifecycle and explicit patrol response capability
 - Offline admission/evidence demo with a protected-path fail-closed probe
+- Integrity-linked local admission audit through CLI, loopback/API-key-governed web API, MCP, and
+  Prometheus
 
 The Python implementation under `python/` is legacy reference code. Rust under
 `crates/contribai-rs/` is the maintained implementation.
@@ -247,6 +263,7 @@ The Python implementation under `python/` is legacy reference code. Rust under
 | `solve <url>` | Analyze issues | `--submit` |
 | `watchlist` | Assess configured repositories | `--submit` |
 | `patrol` | Read review state | `--respond` |
+| `admissions [--json]` | Verify and inspect local admission decisions | None |
 | `mcp-server` | Advertise read-only tools | `--allow-writes` (never PR creation or CLA signing) |
 
 Run `contribai <command> --help` for the complete interface.
@@ -276,6 +293,7 @@ The main Rust modules are:
 
 - `core/admission.rs` — consent, permits, scope enforcement, evidence capsules
 - `orchestrator/pipeline.rs` — read and write capability orchestration
+- `orchestrator/memory.rs` — outcomes, context, and append-only admission audit receipts
 - `analysis/` — AST intelligence, triage, repository context, progressive skills
 - `generator/` — candidate generation, validation, risk, scoring, self-review
 - `github/` — resilient GitHub REST and GraphQL client

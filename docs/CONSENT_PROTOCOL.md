@@ -107,6 +107,32 @@ The current capsule is a deterministic local audit receipt. It is not signed by 
 and does not prove that CI passed after submission. Future schema versions may add signatures or
 external policy-engine attestations without treating unsigned v2 receipts as stronger than they are.
 
+## Admission audit ledger
+
+Every terminal admission attempt appends a content-minimized record to the local SQLite audit
+ledger. A record identifies the decision stage and result, candidate fingerprint, repository,
+paths, scope totals, check results, reason, and the permit/base SHA when one was issued. Generated
+file contents are deliberately excluded.
+
+Each record has a SHA-256 receipt over its fields and the preceding receipt. `contribai admissions`
+verifies the complete chain before listing recent entries and exits non-zero if verification fails:
+
+```bash
+contribai admissions
+contribai admissions --repository owner/repo --decision blocked
+contribai admissions --json
+```
+
+The web surface exposes `GET /api/admissions` under the server's loopback/API-key access policy; the
+default MCP surface exposes the read-only `list_admission_audit` tool. Prometheus reports aggregate
+terminal decisions without repository or path labels. An approved candidate cannot proceed if its
+audit record fails to persist.
+
+The linked receipts detect accidental field mutation, deletion in the middle of a retained chain,
+and reordering. They are not signatures, do not establish reviewer identity, and cannot detect an
+attacker replacing the entire database plus every independently retained head receipt. Detecting
+suffix truncation likewise requires retaining the latest receipt outside the database.
+
 ## Non-goals
 
 The protocol does not:

@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tracing::info;
 
+use crate::core::admission::{AdmissionAuditRecord, AdmissionAuditVerification};
 use crate::core::error::{ContribError, Result};
 
 /// A single message in a PR conversation thread.
@@ -136,6 +137,17 @@ CREATE TABLE IF NOT EXISTS sessions (
     created_at  TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS admission_audit (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    receipt          TEXT NOT NULL UNIQUE,
+    previous_receipt TEXT,
+    repository       TEXT NOT NULL,
+    decision         TEXT NOT NULL,
+    stage            TEXT NOT NULL,
+    recorded_at      TEXT NOT NULL,
+    payload          TEXT NOT NULL
+);
+
 -- Indexes for hot query paths
 CREATE INDEX IF NOT EXISTS idx_submitted_prs_created_at ON submitted_prs(created_at);
 CREATE INDEX IF NOT EXISTS idx_submitted_prs_status ON submitted_prs(status);
@@ -144,6 +156,9 @@ CREATE INDEX IF NOT EXISTS idx_working_memory_repo_key ON working_memory(repo, k
 CREATE INDEX IF NOT EXISTS idx_working_memory_expires ON working_memory(expires_at);
 CREATE INDEX IF NOT EXISTS idx_pr_outcomes_repo ON pr_outcomes(repo);
 CREATE INDEX IF NOT EXISTS idx_findings_cache_repo ON findings_cache(repo);
+CREATE INDEX IF NOT EXISTS idx_admission_audit_recorded_at ON admission_audit(recorded_at);
+CREATE INDEX IF NOT EXISTS idx_admission_audit_repo ON admission_audit(repository);
+CREATE INDEX IF NOT EXISTS idx_admission_audit_decision ON admission_audit(decision);
 "#;
 
 /// Persistent memory backed by SQLite.
@@ -421,7 +436,172 @@ impl Memory {
             .unwrap_or(0);
         stats.insert("total_runs".into(), count);
 
+        let count: i64 = db
+            .query_row("SELECT COUNT(*) FROM admission_audit", [], |r| r.get(0))
+            .unwrap_or(0);
+        stats.insert("admission_decisions_total".into(), count);
+
+        for decision in ["approved", "blocked", "rejected", "skipped", "error"] {
+            let count: i64 = db
+                .query_row(
+                    "SELECT COUNT(*) FROM admission_audit WHERE decision = ?1",
+                    params![decision],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            stats.insert(format!("admission_{decision}_total"), count);
+        }
+
         Ok(stats)
+    }
+
+    // ── Admission audit ──────────────────────────────────────────────────
+
+    /// Append one terminal admission decision to the integrity-linked local ledger.
+    pub fn record_admission_audit(
+        &self,
+        record: AdmissionAuditRecord,
+    ) -> Result<AdmissionAuditRecord> {
+        let mut db = self.lock_db()?;
+        let transaction = db
+            .transaction()
+            .map_err(|error| ContribError::Database(format!("Admission audit begin: {error}")))?;
+        let previous_receipt = transaction
+            .query_row(
+                "SELECT receipt FROM admission_audit ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| {
+                ContribError::Database(format!("Admission audit predecessor query: {error}"))
+            })?;
+        let sealed = record.seal(previous_receipt).map_err(|error| {
+            ContribError::Database(format!("Admission audit receipt encoding: {error}"))
+        })?;
+        let payload = serde_json::to_string(&sealed).map_err(|error| {
+            ContribError::Database(format!("Admission audit payload encoding: {error}"))
+        })?;
+        transaction
+            .execute(
+                "INSERT INTO admission_audit
+                 (receipt, previous_receipt, repository, decision, stage, recorded_at, payload)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    sealed.receipt,
+                    sealed.previous_receipt,
+                    sealed.repository,
+                    sealed.decision.as_str(),
+                    sealed.stage.as_str(),
+                    sealed.recorded_at.to_rfc3339(),
+                    payload,
+                ],
+            )
+            .map_err(|error| ContribError::Database(format!("Admission audit insert: {error}")))?;
+        transaction
+            .commit()
+            .map_err(|error| ContribError::Database(format!("Admission audit commit: {error}")))?;
+        Ok(sealed)
+    }
+
+    /// Read recent admission decisions without exposing generated file contents.
+    pub fn get_admission_audits(
+        &self,
+        repository: Option<&str>,
+        decision: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<AdmissionAuditRecord>> {
+        let db = self.lock_db()?;
+        let mut statement = db
+            .prepare(
+                "SELECT payload FROM admission_audit
+                 WHERE (?1 IS NULL OR repository = ?1)
+                   AND (?2 IS NULL OR decision = ?2)
+                 ORDER BY id DESC LIMIT ?3",
+            )
+            .map_err(|error| ContribError::Database(format!("Admission audit query: {error}")))?;
+        let payloads = statement
+            .query_map(
+                params![repository, decision, limit.clamp(1, 1000) as i64],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|error| {
+                ContribError::Database(format!("Admission audit query map: {error}"))
+            })?;
+        let mut records = Vec::new();
+        for payload in payloads {
+            let payload = payload
+                .map_err(|error| ContribError::Database(format!("Admission audit row: {error}")))?;
+            let record = serde_json::from_str(&payload).map_err(|error| {
+                ContribError::Database(format!("Admission audit payload is invalid: {error}"))
+            })?;
+            records.push(record);
+        }
+        Ok(records)
+    }
+
+    /// Verify receipt hashes and predecessor links for the complete local ledger.
+    pub fn verify_admission_audit_chain(&self) -> Result<AdmissionAuditVerification> {
+        let db = self.lock_db()?;
+        let mut statement = db
+            .prepare(
+                "SELECT payload, receipt, previous_receipt, repository, decision, stage, recorded_at
+                 FROM admission_audit ORDER BY id ASC",
+            )
+            .map_err(|error| {
+                ContribError::Database(format!("Admission audit verification query: {error}"))
+            })?;
+        let payloads = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            })
+            .map_err(|error| {
+                ContribError::Database(format!("Admission audit verification map: {error}"))
+            })?;
+        let mut expected_previous: Option<String> = None;
+        let mut records_checked = 0;
+        for stored in payloads {
+            let (payload, receipt, previous_receipt, repository, decision, stage, recorded_at) =
+                stored.map_err(|error| {
+                    ContribError::Database(format!("Admission audit verification row: {error}"))
+                })?;
+            let record: AdmissionAuditRecord = serde_json::from_str(&payload).map_err(|error| {
+                ContribError::Database(format!(
+                    "Admission audit verification payload is invalid: {error}"
+                ))
+            })?;
+            records_checked += 1;
+            let columns_match = record.receipt == receipt
+                && record.previous_receipt == previous_receipt
+                && record.repository == repository
+                && record.decision.as_str() == decision
+                && record.stage.as_str() == stage
+                && record.recorded_at.to_rfc3339() == recorded_at;
+            if record.previous_receipt != expected_previous
+                || !columns_match
+                || !record.verify_receipt()
+            {
+                return Ok(AdmissionAuditVerification {
+                    valid: false,
+                    records_checked,
+                    first_invalid_receipt: Some(receipt),
+                });
+            }
+            expected_previous = Some(record.receipt);
+        }
+        Ok(AdmissionAuditVerification {
+            valid: true,
+            records_checked,
+            first_invalid_receipt: None,
+        })
     }
 
     // ── Sessions ──────────────────────────────────────────────────────────
@@ -1167,6 +1347,7 @@ fn pr_row_to_map(row: &rusqlite::Row) -> HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::admission::{AdmissionAuditDecision, AdmissionAuditStage};
 
     fn test_memory() -> Memory {
         Memory::open_in_memory().unwrap()
@@ -1310,6 +1491,86 @@ mod tests {
         assert_eq!(stats["total_repos_analyzed"], 1);
         assert_eq!(stats["total_prs_submitted"], 1);
         assert_eq!(stats["prs_merged"], 1);
+    }
+
+    fn audit_record(repository: &str, decision: AdmissionAuditDecision) -> AdmissionAuditRecord {
+        AdmissionAuditRecord {
+            schema_version: 1,
+            receipt: String::new(),
+            previous_receipt: None,
+            repository: repository.to_string(),
+            contribution_fingerprint: "f".repeat(64),
+            stage: AdmissionAuditStage::Admission,
+            decision,
+            reason: "test decision".to_string(),
+            base_sha: Some("0".repeat(40)),
+            permit_id: Some("1".repeat(24)),
+            issue: None,
+            file_count: 1,
+            changed_lines: 2,
+            paths: vec!["src/lib.rs".to_string()],
+            violations: Vec::new(),
+            checks: Vec::new(),
+            recorded_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn admission_audit_is_append_only_filterable_and_linked() {
+        let mem = test_memory();
+        let first = mem
+            .record_admission_audit(audit_record("owner/one", AdmissionAuditDecision::Blocked))
+            .unwrap();
+        let second = mem
+            .record_admission_audit(audit_record("owner/two", AdmissionAuditDecision::Approved))
+            .unwrap();
+
+        assert!(first.verify_receipt());
+        assert_eq!(
+            second.previous_receipt.as_deref(),
+            Some(first.receipt.as_str())
+        );
+        assert!(second.verify_receipt());
+        assert_eq!(
+            mem.get_admission_audits(Some("owner/two"), Some("approved"), 10)
+                .unwrap(),
+            vec![second]
+        );
+        assert!(mem.verify_admission_audit_chain().unwrap().valid);
+    }
+
+    #[test]
+    fn admission_audit_chain_detects_payload_tampering() {
+        let mem = test_memory();
+        mem.record_admission_audit(audit_record("owner/repo", AdmissionAuditDecision::Approved))
+            .unwrap();
+        {
+            let db = mem.lock_db().unwrap();
+            let payload: String = db
+                .query_row("SELECT payload FROM admission_audit", [], |row| row.get(0))
+                .unwrap();
+            let tampered = payload.replace("test decision", "changed decision");
+            db.execute("UPDATE admission_audit SET payload = ?1", params![tampered])
+                .unwrap();
+        }
+        let verification = mem.verify_admission_audit_chain().unwrap();
+        assert!(!verification.valid);
+        assert_eq!(verification.records_checked, 1);
+    }
+
+    #[test]
+    fn admission_audit_chain_detects_index_column_tampering() {
+        let mem = test_memory();
+        mem.record_admission_audit(audit_record("owner/repo", AdmissionAuditDecision::Approved))
+            .unwrap();
+        {
+            let db = mem.lock_db().unwrap();
+            db.execute("UPDATE admission_audit SET decision = 'blocked'", [])
+                .unwrap();
+        }
+        let verification = mem.verify_admission_audit_chain().unwrap();
+        assert!(!verification.valid);
+        assert_eq!(verification.records_checked, 1);
     }
 
     // ── Dream consolidation tests ─────────────────────────────────────────
