@@ -115,12 +115,20 @@ function runInstaller(t, engine, options = {}) {
     MOCK_FAIL: options.fail || "", MOCK_LOG: log.replaceAll("\\", "/"),
     MOCK_INSTALLER: installer.replaceAll("\\", "/"),
   };
+  // A Windows PowerShell child launched through Node cannot detect a pwsh parent.
+  // Let each engine construct its own module search path instead of inheriting another edition's.
+  if (engine.name !== "bash") {
+    for (const key of Object.keys(env)) {
+      if (key.toLowerCase() === "psmodulepath") delete env[key];
+    }
+  }
   const args = engine.name === "bash" ? [harness.replaceAll("\\", "/")]
     : ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", harness];
   const result = spawnSync(engine.executable, args, { env, encoding: "utf8", timeout: 60000 });
   assert.ifError(result.error);
   if (options.reject) {
     assert.notEqual(result.status, 0, result.stdout);
+    if (options.error) assert(`${result.stdout}${result.stderr}`.includes(options.error), result.stderr || result.stdout);
     assert.deepEqual(readFileSync(installed), oldBytes, "failure must preserve the installed binary");
   } else {
     assert.equal(result.status, 0, result.stderr || result.stdout);
@@ -148,7 +156,7 @@ for (const engine of engines) {
     test(`${engine.name}: ${fail} failure preserves installation`, (t) => runInstaller(t, engine, { fail, reject: true }));
   }
   for (const checksum of ["not-a-checksum", `${"0".repeat(64)}  fixture\n`]) {
-    test(`${engine.name}: reject malformed or mismatched checksum ${checksum.slice(0, 12)}`, (t) => runInstaller(t, engine, { checksum, reject: true }));
+    test(`${engine.name}: reject malformed or mismatched checksum ${checksum.slice(0, 12)}`, (t) => runInstaller(t, engine, { checksum, reject: true, error: checksum === "not-a-checksum" ? "Release checksum is malformed" : "Checksum verification failed" }));
   }
 }
 for (const platform of ["macos-x86_64", "macos-aarch64"]) {
