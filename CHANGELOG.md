@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Use Bash in installation examples and preserve literal Windows installation paths.
 - Exercise installer failure handling and binary preservation in isolated cross-platform tests.
 
+## [6.10.1] - 2026-09-08
+
 ### Security
 - Verify the full retained admission audit chain in the same write transaction as each append.
   Corrupted history and unsupported record schemas block new receipts and approved submissions.
