@@ -1,15 +1,15 @@
 # Current delivery roadmap
 
-Updated: 2026-09-08. Latest published version: v6.9.0. The Rust workspace and
+Updated: 2026-09-08. Latest published version: v6.10.0. The Rust workspace and
 [product contract](../AGENTS.md) govern all phases below.
 
-## Phase 1: Admission evidence (implemented, awaiting release)
+## Phase 1: Admission evidence (released in v6.10.0)
 
 - Integrity-linked local admission ledger and fail-closed persistence for approved submissions.
 - Read-only CLI, authenticated web API, MCP inspection, and decision metrics.
 - Evidence: `8bf9036`, admission and memory tests, and `docs/CONSENT_PROTOCOL.md`.
 
-## Phase 2: Release reliability (in progress)
+## Phase 2: Release reliability (released in v6.10.0)
 
 - Require all four platform builds, workspace tests, and exact-binary offline safety demos
   before a single publishing job uploads the complete release asset set.
@@ -17,20 +17,29 @@ Updated: 2026-09-08. Latest published version: v6.9.0. The Rust workspace and
 - Run the installed release on Linux, Windows, and macOS after publication.
 - Exit evidence: required local checks, green CI for the release commit, successful tagged
   release workflow, all eight binary/checksum assets, and passing installer smoke jobs.
-- Next release candidate: v6.10.0, including the admission ledger and dependency fixes.
-  Do not mark this phase complete until remote release evidence is available.
+- Completed evidence: [candidate CI](https://github.com/tang-vu/ContribAI/actions/runs/34241720698)
+  and [release workflow](https://github.com/tang-vu/ContribAI/actions/runs/34242979684) passed on
+  `1551ed459f8a45e846a18df39f65d55c899db04c`, including all four installer smoke jobs.
+- [v6.10.0 is public](https://github.com/tang-vu/ContribAI/releases/tag/v6.10.0) with eight assets.
+  Downloaded checksums and all four binary attestations were verified against the exact commit,
+  tag, and workflow; the downloaded Windows binary passed its offline safety demo.
 
-## Phase 3: Maintainer operations (planned)
+## Phase 3: Maintainer operations (v6.10.1 candidate)
 
-- Improve audit inspection and actionable failure diagnostics without exposing secrets or
-  generated source content.
-- Document recovery from corrupted local audit state and preserve fail-closed submission.
-- Add regression coverage for consent revocation and exact-candidate review boundaries where
-  review identifies gaps; ship a separately verified release.
+- Verify retained audit history inside each append transaction and provide failure diagnostics
+  without exposing stored payload values.
+- Preserve damaged audit state, reject unsupported schemas, and document recovery while keeping
+  approved submissions fail-closed.
+- Regression coverage includes earlier-row tampering, deleted records, malformed payloads, and
+  concurrent writers. Existing consent-revocation and exact-candidate checks continue to pass.
+- [PR #53](https://github.com/tang-vu/ContribAI/pull/53) tracks this phase. The implementation passed
+  700 local tests and cross-platform CI; versioned release verification remains in progress.
 
 ## Phase 4: Adoption and support (planned)
 
 - Reconcile operator documentation with the current CLI and safe configuration defaults.
+- Ensure ordinary installers target a published release while a newer candidate is still building;
+  retain an explicit version pin for reproducible installs and release smoke tests.
 - Exercise the documented onboarding path from clean installs on supported platforms.
 - Publish a support and compatibility matrix backed by CI evidence.
 
