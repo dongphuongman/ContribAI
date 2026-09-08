@@ -7,6 +7,7 @@ Start with these documents:
 - [Project website](https://contribai-topaz.vercel.app/) — concise public introduction and
   read-only onboarding
 - [Five-minute walkthrough](QUICKSTART.md) — offline policy proof before credentials or network
+- [Deployment guide](deployment-guide.md) ? source builds, dashboard, Docker, and recovery
 - [Website maintenance](WEBSITE.md) — local preview, contract checks, and deployment
 - [Vercel deployment](VERCEL_DEPLOYMENT.md) — static hosting boundary and production setup
 - [Vercel OSS application](VERCEL_OSS_APPLICATION.md) — evidence-backed application worksheet
