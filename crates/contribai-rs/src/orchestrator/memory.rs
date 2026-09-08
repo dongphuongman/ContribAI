@@ -5,7 +5,7 @@
 //! and working memory with TTL.
 
 use chrono::{Duration, Utc};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -457,15 +457,20 @@ impl Memory {
 
     // ── Admission audit ──────────────────────────────────────────────────
 
-    /// Append one terminal admission decision to the integrity-linked local ledger.
+    /// Verify the retained ledger and append a terminal decision in one write transaction.
     pub fn record_admission_audit(
         &self,
         record: AdmissionAuditRecord,
     ) -> Result<AdmissionAuditRecord> {
         let mut db = self.lock_db()?;
         let transaction = db
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| ContribError::Database(format!("Admission audit begin: {error}")))?;
+        if !Self::verify_admission_audit_chain_in(&transaction)?.valid {
+            return Err(ContribError::Database(
+                "Admission audit integrity check failed; preserve the database and follow docs/AUDIT_RECOVERY.md before submitting".into(),
+            ));
+        }
         let previous_receipt = transaction
             .query_row(
                 "SELECT receipt FROM admission_audit ORDER BY id DESC LIMIT 1",
@@ -479,6 +484,11 @@ impl Memory {
         let sealed = record.seal(previous_receipt).map_err(|error| {
             ContribError::Database(format!("Admission audit receipt encoding: {error}"))
         })?;
+        if !sealed.verify_receipt() {
+            return Err(ContribError::Database(
+                "Admission audit record uses an unsupported schema".into(),
+            ));
+        }
         let payload = serde_json::to_string(&sealed).map_err(|error| {
             ContribError::Database(format!("Admission audit payload encoding: {error}"))
         })?;
@@ -532,9 +542,8 @@ impl Memory {
         for payload in payloads {
             let payload = payload
                 .map_err(|error| ContribError::Database(format!("Admission audit row: {error}")))?;
-            let record = serde_json::from_str(&payload).map_err(|error| {
-                ContribError::Database(format!("Admission audit payload is invalid: {error}"))
-            })?;
+            let record = serde_json::from_str(&payload)
+                .map_err(|_| ContribError::Database("Admission audit payload is invalid".into()))?;
             records.push(record);
         }
         Ok(records)
@@ -543,6 +552,10 @@ impl Memory {
     /// Verify receipt hashes and predecessor links for the complete local ledger.
     pub fn verify_admission_audit_chain(&self) -> Result<AdmissionAuditVerification> {
         let db = self.lock_db()?;
+        Self::verify_admission_audit_chain_in(&db)
+    }
+
+    fn verify_admission_audit_chain_in(db: &Connection) -> Result<AdmissionAuditVerification> {
         let mut statement = db
             .prepare(
                 "SELECT payload, receipt, previous_receipt, repository, decision, stage, recorded_at
@@ -573,10 +586,8 @@ impl Memory {
                 stored.map_err(|error| {
                     ContribError::Database(format!("Admission audit verification row: {error}"))
                 })?;
-            let record: AdmissionAuditRecord = serde_json::from_str(&payload).map_err(|error| {
-                ContribError::Database(format!(
-                    "Admission audit verification payload is invalid: {error}"
-                ))
+            let record: AdmissionAuditRecord = serde_json::from_str(&payload).map_err(|_| {
+                ContribError::Database("Admission audit verification payload is invalid".into())
             })?;
             records_checked += 1;
             let columns_match = record.receipt == receipt
@@ -1571,6 +1582,115 @@ mod tests {
         let verification = mem.verify_admission_audit_chain().unwrap();
         assert!(!verification.valid);
         assert_eq!(verification.records_checked, 1);
+    }
+
+    fn audit_payloads(mem: &Memory) -> Vec<String> {
+        let db = mem.lock_db().unwrap();
+        let mut query = db
+            .prepare("SELECT payload FROM admission_audit ORDER BY id")
+            .unwrap();
+        query
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn admission_audit_append_rejects_corruption_anywhere_in_history() {
+        for mutation in [
+            "UPDATE admission_audit SET payload = replace(payload, 'test decision', 'modified') WHERE id = 1",
+            "UPDATE admission_audit SET decision = 'blocked' WHERE id = 1",
+            "DELETE FROM admission_audit WHERE id = 2",
+        ] {
+            let mem = test_memory();
+            for _ in 0..3 {
+                mem.record_admission_audit(audit_record(
+                    "owner/repo",
+                    AdmissionAuditDecision::Approved,
+                ))
+                .unwrap();
+            }
+            mem.lock_db().unwrap().execute(mutation, []).unwrap();
+            let before = audit_payloads(&mem);
+            let error = mem
+                .record_admission_audit(audit_record("owner/repo", AdmissionAuditDecision::Approved))
+                .unwrap_err();
+            assert!(error.to_string().contains("integrity check failed"));
+            assert_eq!(audit_payloads(&mem), before, "must preserve damaged history");
+            assert!(!mem.verify_admission_audit_chain().unwrap().valid);
+        }
+    }
+
+    #[test]
+    fn admission_audit_invalid_payload_errors_do_not_expose_stored_values() {
+        let mem = test_memory();
+        mem.record_admission_audit(audit_record("owner/repo", AdmissionAuditDecision::Approved))
+            .unwrap();
+        let sensitive_value = "private-repository-content-must-not-be-logged";
+        let mut payload: serde_json::Value =
+            serde_json::from_str(&audit_payloads(&mem)[0]).unwrap();
+        payload["decision"] = sensitive_value.into();
+        mem.lock_db()
+            .unwrap()
+            .execute(
+                "UPDATE admission_audit SET payload = ?1",
+                params![payload.to_string()],
+            )
+            .unwrap();
+        let before = audit_payloads(&mem);
+        for result in [
+            mem.verify_admission_audit_chain().map(|_| ()),
+            mem.get_admission_audits(None, None, 10).map(|_| ()),
+            mem.record_admission_audit(audit_record(
+                "owner/repo",
+                AdmissionAuditDecision::Approved,
+            ))
+            .map(|_| ()),
+        ] {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("payload is invalid"));
+            assert!(!error.contains(sensitive_value));
+        }
+        assert_eq!(audit_payloads(&mem), before);
+    }
+
+    #[test]
+    fn admission_audit_rejects_unsupported_new_record_schema() {
+        let mem = test_memory();
+        let mut record = audit_record("owner/repo", AdmissionAuditDecision::Approved);
+        record.schema_version = 99;
+        assert!(mem.record_admission_audit(record).is_err());
+        assert!(audit_payloads(&mem).is_empty());
+        assert!(mem.verify_admission_audit_chain().unwrap().valid);
+    }
+
+    #[test]
+    fn admission_audit_concurrent_connections_preserve_one_chain() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("audit.db");
+        let connections = [Memory::open(&path).unwrap(), Memory::open(&path).unwrap()];
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let writers = connections.map(|mem| {
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..4 {
+                    mem.record_admission_audit(audit_record(
+                        "owner/repo",
+                        AdmissionAuditDecision::Approved,
+                    ))
+                    .unwrap();
+                }
+            })
+        });
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let mem = Memory::open(&path).unwrap();
+        let verified = mem.verify_admission_audit_chain().unwrap();
+        assert!(verified.valid);
+        assert_eq!(verified.records_checked, 8);
     }
 
     // ── Dream consolidation tests ─────────────────────────────────────────

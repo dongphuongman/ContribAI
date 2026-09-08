@@ -76,6 +76,12 @@ memory, caches, and event logs. Admission records exclude generated file content
 repository names and changed paths. Operators should protect the ContribAI data directory as they
 would source-code metadata.
 
+Admission appends verify all retained receipts and indexed fields in one SQLite write transaction.
+Corruption or malformed payloads prevent appending, and approved submissions fail closed when
+their receipt cannot be recorded. This does not detect suffix truncation or full replacement
+without an independently retained receipt. Audit parsing errors omit stored values. See
+[audit recovery](AUDIT_RECOVERY.md) before restoring or investigating damaged state.
+
 ## Out of scope assumptions
 
 - The operating system and Rust toolchain are not already compromised.

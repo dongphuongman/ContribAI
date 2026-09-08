@@ -220,7 +220,7 @@ failed, cross-repository, scope-mismatched, or fingerprint-mismatched capsules a
 maintainer consent. It remains a local audit receipt, not a substitute for CI, code review,
 provenance attestation, or maintainer judgment.
 
-Every terminal admission attempt is also appended to the local admission audit ledger. Records
+ContribAI attempts to append every terminal admission decision to the local audit ledger. Records
 contain the candidate fingerprint, permit/base SHA when available, scope, checks, decision stage,
 and reason—never generated file contents. Each record's SHA-256 receipt binds the preceding receipt,
 so accidental edits or broken ordering are detectable when the complete local chain is verified:
@@ -233,6 +233,8 @@ contribai admissions --json
 
 The hash chain is a local integrity check, not a signature or remote attestation. An approved
 submission fails closed if its audit decision cannot be persisted.
+Each append verifies the retained history in the same write transaction; corrupted history blocks
+new receipts. See [audit recovery](docs/AUDIT_RECOVERY.md) for preserving and restoring evidence.
 
 ## Capabilities
 
@@ -332,7 +334,7 @@ node --test scripts/check-release-assets.test.mjs
 (cd examples/quickstart-repository && npm test)
 ```
 
-The current workspace runs **696 passing tests** plus one intentionally ignored doctest.
+The current workspace runs **700 passing tests** plus one intentionally ignored doctest.
 
 See the [current phased delivery roadmap](docs/project-roadmap.md) for release gates and upcoming work.
 

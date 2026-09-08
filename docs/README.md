@@ -12,6 +12,7 @@ Start with these documents:
 - [Vercel OSS application](VERCEL_OSS_APPLICATION.md) — evidence-backed application worksheet
 - [Architecture](../ARCHITECTURE.md) — components and trust boundaries
 - [Consent protocol](CONSENT_PROTOCOL.md) — repository opt-in and issue-scoped approval
+- [Audit recovery](AUDIT_RECOVERY.md) — integrity failures, evidence preservation, and restoration
 - [Threat model](THREAT_MODEL.md) — assets, adversaries, mitigations, and residual risk
 - [Security policy](../SECURITY.md) — supported versions and private reporting
 - [Governance](../GOVERNANCE.md) — decision process and project roles
