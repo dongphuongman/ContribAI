@@ -3,6 +3,10 @@
 This procedure applies to releases of this repository. It does not grant permission to submit
 contributions to other repositories. The [product contract](../AGENTS.md) remains in force.
 
+The root `Cargo.lock` is the single tracked lockfile for this workspace, including source installs
+with `cargo install --path crates/contribai-rs --locked`. Do not keep a member-level lockfile:
+Cargo packages generate their own lockfile from the workspace dependency resolution.
+
 ## Prepare a candidate
 
 1. Choose a semantic version and describe the user-visible changes, migration requirements,

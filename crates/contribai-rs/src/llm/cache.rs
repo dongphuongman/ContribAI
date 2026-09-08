@@ -289,16 +289,10 @@ impl crate::llm::provider::LlmProvider for CachedLlmProvider {
 mod tests {
     use super::*;
 
-    fn temp_cache() -> LlmCache {
-        let path = std::env::temp_dir().join(format!(
-            "contribai_test_cache_{}_{}.db",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        LlmCache::new(&path, 7).unwrap()
+    fn temp_cache() -> (tempfile::TempDir, LlmCache) {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = LlmCache::new(&directory.path().join("cache.db"), 7).unwrap();
+        (directory, cache)
     }
 
     #[test]
@@ -318,7 +312,7 @@ mod tests {
 
     #[test]
     fn test_cache_get_put() {
-        let cache = temp_cache();
+        let (_directory, cache) = temp_cache();
         let hash = LlmCache::compute_hash("gemini", "sys", "user prompt");
 
         // Miss
@@ -336,7 +330,7 @@ mod tests {
 
     #[test]
     fn test_cache_overwrite() {
-        let cache = temp_cache();
+        let (_directory, cache) = temp_cache();
         let hash = LlmCache::compute_hash("gemini", "sys", "prompt");
 
         cache.put(&hash, "gemini", "sys", "prompt", "v1").unwrap();
@@ -347,7 +341,7 @@ mod tests {
 
     #[test]
     fn test_cache_clear() {
-        let cache = temp_cache();
+        let (_directory, cache) = temp_cache();
         let hash = LlmCache::compute_hash("gemini", "sys", "prompt");
         cache
             .put(&hash, "gemini", "sys", "prompt", "response")
@@ -360,7 +354,7 @@ mod tests {
 
     #[test]
     fn test_cache_stats() {
-        let cache = temp_cache();
+        let (_directory, cache) = temp_cache();
         let hash1 = LlmCache::compute_hash("gemini", "sys", "prompt1");
         let hash2 = LlmCache::compute_hash("gemini", "sys", "prompt2");
 
@@ -376,7 +370,7 @@ mod tests {
 
     #[test]
     fn test_cache_prune_expired() {
-        let cache = temp_cache();
+        let (_directory, cache) = temp_cache();
         let hash = LlmCache::compute_hash("gemini", "sys", "prompt");
         cache
             .put(&hash, "gemini", "sys", "prompt", "response")

@@ -1,6 +1,6 @@
 # Current delivery roadmap
 
-Updated: 2026-09-08. Latest published version: v6.10.0. The Rust workspace and
+Updated: 2026-09-09. Latest published version: v6.10.0. The Rust workspace and
 [product contract](../AGENTS.md) govern all phases below.
 
 ## Phase 1: Admission evidence (released in v6.10.0)
@@ -24,7 +24,7 @@ Updated: 2026-09-08. Latest published version: v6.10.0. The Rust workspace and
   Downloaded checksums and all four binary attestations were verified against the exact commit,
   tag, and workflow; the downloaded Windows binary passed its offline safety demo.
 
-## Phase 3: Maintainer operations (v6.10.1 candidate)
+## Phase 3: Maintainer operations (v6.10.2 candidate)
 
 - Verify retained audit history inside each append transaction and provide failure diagnostics
   without exposing stored payload values.
@@ -32,10 +32,12 @@ Updated: 2026-09-08. Latest published version: v6.10.0. The Rust workspace and
   approved submissions fail-closed.
 - Regression coverage includes earlier-row tampering, deleted records, malformed payloads, and
   concurrent writers. Existing consent-revocation and exact-candidate checks continue to pass.
-- [PR #53](https://github.com/tang-vu/ContribAI/pull/53) tracks this phase. The implementation passed
-  700 local tests and cross-platform CI; versioned release verification remains in progress.
+- [PR #53](https://github.com/tang-vu/ContribAI/pull/53) merged after 700 local tests and successful
+  cross-platform CI. The v6.10.1 release was blocked by a timestamp collision between snapshot tests.
+  Its tag and [failed run](https://github.com/tang-vu/ContribAI/actions/runs/34251923968) are retained;
+  v6.10.2 isolates test databases and includes the audit changes. Release verification is pending.
 
-## Phase 4: Adoption and support (planned)
+## Phase 4: Adoption and support (v6.10.2 candidate)
 
 - Reconcile operator documentation with the current CLI and safe configuration defaults.
 - Ensure ordinary installers target a published release while a newer candidate is still building;
