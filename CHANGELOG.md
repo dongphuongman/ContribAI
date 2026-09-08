@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Remove the obsolete member-level Cargo lockfile; the audited root workspace lockfile remains
+  the dependency source for builds, source installation, and generated Cargo packages.
+
 ## [6.10.1] - 2026-09-08
 
 ### Security
