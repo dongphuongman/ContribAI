@@ -100,7 +100,7 @@ See [the threat model](docs/THREAT_MODEL.md) and
 ### Install a release
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/tang-vu/ContribAI/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/tang-vu/ContribAI/main/install.sh | bash
 ```
 
 On Windows PowerShell:
@@ -109,8 +109,10 @@ On Windows PowerShell:
 irm https://raw.githubusercontent.com/tang-vu/ContribAI/main/install.ps1 | iex
 ```
 
-The installers verify the release checksum. Their isolated install path is smoke-tested against the
-published binary on Linux, macOS, and Windows for every release.
+The installers select the latest published stable release and verify its checksum.
+Set `CONTRIBAI_VERSION` to an exact tag (for example, `v6.10.0`) to pin a release.
+See [installation options](docs/QUICKSTART.md#installation-options) for platform commands.
+The isolated install path is smoke-tested against the published binary on Linux, macOS, and Windows for every release.
 
 ### Build from source
 
