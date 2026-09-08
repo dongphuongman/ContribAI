@@ -109,7 +109,7 @@ external policy-engine attestations without treating unsigned v2 receipts as str
 
 ## Admission audit ledger
 
-Every terminal admission attempt appends a content-minimized record to the local SQLite audit
+ContribAI attempts to record every terminal admission decision in the local SQLite audit
 ledger. A record identifies the decision stage and result, candidate fingerprint, repository,
 paths, scope totals, check results, reason, and the permit/base SHA when one was issued. Generated
 file contents are deliberately excluded.
@@ -127,6 +127,11 @@ The web surface exposes `GET /api/admissions` under the server's loopback/API-ke
 default MCP surface exposes the read-only `list_admission_audit` tool. Prometheus reports aggregate
 terminal decisions without repository or path labels. An approved candidate cannot proceed if its
 audit record fails to persist.
+
+Before appending a decision, the full retained chain is verified in the same SQLite write
+transaction. Corrupted history or an unsupported record schema prevents the append, preserving
+the stored evidence and blocking approved submissions. See [audit recovery](AUDIT_RECOVERY.md)
+for inspection and restoration steps. Payload parsing errors never include the stored values.
 
 The linked receipts detect accidental field mutation, deletion in the middle of a retained chain,
 and reordering. They are not signatures, do not establish reviewer identity, and cannot detect an

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.10.1] - 2026-09-08
+
+### Security
+- Verify the full retained admission audit chain in the same write transaction as each append.
+  Corrupted history and unsupported record schemas block new receipts and approved submissions.
+- Omit stored payload values from audit parsing errors and document evidence-preserving recovery.
+
 ## [6.10.0] - 2026-09-08
 
 ### Added
