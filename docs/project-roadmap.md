@@ -1,6 +1,6 @@
 # Current delivery roadmap
 
-Updated: 2026-09-09. Latest published version: v6.10.0. The Rust workspace and
+Updated: 2026-09-09. Latest published version: v6.10.2. The Rust workspace and
 [product contract](../AGENTS.md) govern all phases below.
 
 ## Phase 1: Admission evidence (released in v6.10.0)
@@ -24,7 +24,7 @@ Updated: 2026-09-09. Latest published version: v6.10.0. The Rust workspace and
   Downloaded checksums and all four binary attestations were verified against the exact commit,
   tag, and workflow; the downloaded Windows binary passed its offline safety demo.
 
-## Phase 3: Maintainer operations (v6.10.2 candidate)
+## Phase 3: Maintainer operations (released in v6.10.2)
 
 - Verify retained audit history inside each append transaction and provide failure diagnostics
   without exposing stored payload values.
@@ -35,18 +35,45 @@ Updated: 2026-09-09. Latest published version: v6.10.0. The Rust workspace and
 - [PR #53](https://github.com/tang-vu/ContribAI/pull/53) merged after 700 local tests and successful
   cross-platform CI. The v6.10.1 release was blocked by a timestamp collision between snapshot tests.
   Its tag and [failed run](https://github.com/tang-vu/ContribAI/actions/runs/34251923968) are retained;
-  v6.10.2 isolates test databases and includes the audit changes. Release verification is pending.
+  v6.10.2 isolates test databases and includes the audit changes. Its release verification passed.
 
-## Phase 4: Adoption and support (v6.10.2 candidate)
+## Phase 4: Adoption and support (released in v6.10.2)
 
-- Reconcile operator documentation with the current CLI and safe configuration defaults.
-- Ensure ordinary installers target a published release while a newer candidate is still building;
-  retain an explicit version pin for reproducible installs and release smoke tests.
-- Exercise the documented onboarding path from clean installs on supported platforms.
-- Publish a support and compatibility matrix backed by CI evidence.
+- [Current deployment guidance](deployment-guide.md) matches the CLI, locked Rust workspace,
+  dashboard authentication, Compose profiles, and evidence-preserving upgrades.
+- Installers resolve a published release by default and accept exact version pins. CI exercises
+  Bash, Windows PowerShell 5.1, and PowerShell 7, including failure paths that preserve an existing
+  installation. Release smoke tests pin the exact tag on all four supported platforms.
+- The [installation options](QUICKSTART.md#installation-options) and deployment guide state the
+  platform matrix and compatibility limits. Compose configuration syntax was validated;
+  container runtime startup is not claimed as part of the release verification.
+- The obsolete member lockfile is removed. Generated package dependencies match all 460 root
+  lockfile entries; a locked source install and offline demo passed. GitHub reported zero open
+  Dependabot alerts after the removal reached main on 2026-09-09.
 
-Each phase requires focused commits, the repository's full verification suite, and a release
-with stated limitations. None enables unsolicited submissions, automatic merging, or CLA signing.
+## Verified delivery evidence
+
+[v6.10.2 is public](https://github.com/tang-vu/ContribAI/releases/tag/v6.10.2) at
+`5a3f7b1f676a18b31cd0d2c7693aa92a10650db5`.
+[Candidate CI](https://github.com/tang-vu/ContribAI/actions/runs/34255839811) and
+[the nine-job release workflow](https://github.com/tang-vu/ContribAI/actions/runs/34257076211)
+passed, including installer smoke tests on Linux, Windows, macOS Intel, and macOS ARM64.
+All eight downloaded binary/checksum assets matched. Each binary's GitHub attestation was verified
+against the exact source commit, tag, and release workflow. The downloaded Windows binary reported
+6.10.2 and passed the offline safety demo. A fresh default Windows installer run also selected
+v6.10.2, verified its checksum, and passed the demo.
+
+Local checks passed formatting, clippy with warnings denied, 700 Rust tests, release build,
+RustSec audit, and audit CLI corruption/recovery checks. Snapshot and cache tests each passed 20
+repeated runs with 8 test threads. [Release notes](https://github.com/tang-vu/ContribAI/releases/tag/v6.10.2)
+record the administrator merge exceptions requested by the owner; independent human review is not
+claimed. Branch review requirements remain configured.
+
+All four delivery phases above are complete with the stated evidence and limits. Audit verification
+cost grows with retained history; detecting suffix truncation or full database replacement requires
+an independently retained receipt. See [audit recovery](AUDIT_RECOVERY.md). The shipped product
+still requires explicit submission capability, current maintainer consent, exact-candidate human
+review, and draft-only upstream proposals. It does not merge contributions or sign CLAs.
 
 ---
 
