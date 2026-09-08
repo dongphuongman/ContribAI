@@ -328,10 +328,13 @@ cargo build --workspace --release
 node scripts/check-site.mjs
 node --check site/app.js
 node scripts/check-installers.mjs
+node --test scripts/check-release-assets.test.mjs
 (cd examples/quickstart-repository && npm test)
 ```
 
-The current workspace runs **686 passing tests** plus one intentionally ignored doctest.
+The current workspace runs **696 passing tests** plus one intentionally ignored doctest.
+
+See the [current phased delivery roadmap](docs/project-roadmap.md) for release gates and upcoming work.
 
 ## Project policy
 

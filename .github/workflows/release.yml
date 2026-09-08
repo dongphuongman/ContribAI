@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
+  build:
     name: ${{ matrix.asset }}
     strategy:
       fail-fast: false
@@ -24,7 +24,7 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             asset: windows-x86_64.exe
-          - os: macos-latest
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             asset: macos-x86_64
           - os: macos-latest
@@ -32,9 +32,7 @@ jobs:
             asset: macos-aarch64
     runs-on: ${{ matrix.os }}
     permissions:
-      contents: write
-      id-token: write
-      attestations: write
+      contents: read
     steps:
       - name: Checkout tagged source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -57,8 +55,23 @@ jobs:
         run: |
           crate_version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' crates/contribai-rs/Cargo.toml | head -1)
           test "v${crate_version}" = "${GITHUB_REF_NAME}"
+      - name: Test tagged source
+        run: cargo test --workspace --locked
+      - name: Check installer contract
+        run: node scripts/check-installers.mjs
       - name: Build locked release
         run: cargo build --workspace --release --locked --target ${{ matrix.target }}
+      - name: Smoke-test exact release binary
+        shell: bash
+        env:
+          RELEASE_TARGET: ${{ matrix.target }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          binary="target/${RELEASE_TARGET}/release/contribai"
+          if [ "$RUNNER_OS" = Windows ]; then binary="${binary}.exe"; fi
+          test "$("$binary" --version)" = "contribai ${RELEASE_TAG#v}"
+          "$binary" demo --json > demo.json
+          node -e 'const r=JSON.parse(require("fs").readFileSync("demo.json","utf8"));if(r.external_writes_enabled||r.submission!=="not_attempted"||!r.candidate.evidence_valid||r.protected_path_probe.admission_allowed)process.exit(1)'
       - name: Prepare asset (Unix)
         if: runner.os != 'Windows'
         shell: bash
@@ -73,18 +86,56 @@ jobs:
           Copy-Item "target/${{ matrix.target }}/release/contribai.exe" $asset
           $hash = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $asset" | Set-Content "$asset.sha256" -Encoding ascii
+      - name: Stage verified assets
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: release-${{ matrix.asset }}
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            contribai-${{ github.ref_name }}-${{ matrix.asset }}
+            contribai-${{ github.ref_name }}-${{ matrix.asset }}.sha256
+
+  release:
+    name: Publish complete release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout tagged verifier
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Download all staged assets
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: assets
+      - name: Verify complete asset set and checksums
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node scripts/check-release-assets.mjs assets "$RELEASE_TAG"
       - name: Attest binary provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
-          subject-path: contribai-${{ github.ref_name }}-${{ matrix.asset }}
-      - name: Publish GitHub release asset
+          subject-path: assets/contribai-*
+      - name: Stage GitHub draft release assets
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
+          draft: true
           generate_release_notes: true
           fail_on_unmatched_files: true
-          files: |
-            contribai-${{ github.ref_name }}-${{ matrix.asset }}
-            contribai-${{ github.ref_name }}-${{ matrix.asset }}.sha256
+          files: assets/contribai-*
+      - name: Publish uploaded release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release edit "$RELEASE_TAG" --draft=false --latest
 
   installer-smoke:
     name: Installer smoke (${{ matrix.os }})
@@ -92,7 +143,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest, macos-15-intel]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     permissions:
@@ -106,10 +157,11 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         env:
+          RELEASE_TAG: ${{ github.ref_name }}
           CONTRIBAI_INSTALL_DIR: ${{ runner.temp }}/contribai-bin
         run: |
           bash ./install.sh
-          "$CONTRIBAI_INSTALL_DIR/contribai" --version
+          test "$("$CONTRIBAI_INSTALL_DIR/contribai" --version)" = "contribai ${RELEASE_TAG#v}"
           "$CONTRIBAI_INSTALL_DIR/contribai" demo --json > "$RUNNER_TEMP/contribai-demo.json"
           node -e 'const fs=require("fs");const r=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(r.external_writes_enabled||r.submission!=="not_attempted"||!r.candidate.evidence_valid||r.protected_path_probe.admission_allowed)process.exit(1)' "$RUNNER_TEMP/contribai-demo.json"
       - name: Install and exercise release (Windows)
@@ -118,12 +170,17 @@ jobs:
         env:
           CONTRIBAI_INSTALL_DIR: ${{ runner.temp }}\contribai-bin
           CONTRIBAI_NO_PATH_UPDATE: "1"
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           & .\install.ps1
           $binary = Join-Path $env:CONTRIBAI_INSTALL_DIR "contribai.exe"
-          & $binary --version
+          $installedVersion = & $binary --version
+          if ($LASTEXITCODE -ne 0 -or $installedVersion -ne "contribai $($env:RELEASE_TAG.Substring(1))") {
+              throw "Installed binary does not match the release tag"
+          }
           $receipt = Join-Path $env:RUNNER_TEMP "contribai-demo.json"
           & $binary demo --json | Set-Content -LiteralPath $receipt -Encoding utf8
+          if ($LASTEXITCODE -ne 0) { throw "Installed safety demo exited unsuccessfully" }
           $report = Get-Content -LiteralPath $receipt -Raw | ConvertFrom-Json
           if ($report.external_writes_enabled -or $report.submission -ne "not_attempted" -or -not $report.candidate.evidence_valid -or $report.protected_path_probe.admission_allowed) {
               throw "Installed release failed the offline safety demo"

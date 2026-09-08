@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added Prometheus admission decision counters by terminal result.
 
 ### Changed
+- Release publishing now waits for all four platform builds, workspace tests, and exact-binary
+  safety demos; a single publisher verifies the complete asset set and checksums before upload.
+  Uploads remain draft until complete. Build jobs no longer hold repository write or attestation
+  permissions. Installer smoke checks cover all four platforms and require the tagged version.
 - Approved submissions now fail closed if their admission decision cannot be persisted to the local
   audit ledger.
 

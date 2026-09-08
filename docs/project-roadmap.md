@@ -1,4 +1,50 @@
-# Project Roadmap
+# Current delivery roadmap
+
+Updated: 2026-09-08. Latest published version: v6.9.0. The Rust workspace and
+[product contract](../AGENTS.md) govern all phases below.
+
+## Phase 1: Admission evidence (implemented, awaiting release)
+
+- Integrity-linked local admission ledger and fail-closed persistence for approved submissions.
+- Read-only CLI, authenticated web API, MCP inspection, and decision metrics.
+- Evidence: `8bf9036`, admission and memory tests, and `docs/CONSENT_PROTOCOL.md`.
+
+## Phase 2: Release reliability (in progress)
+
+- Require all four platform builds, workspace tests, and exact-binary offline safety demos
+  before a single publishing job uploads the complete release asset set.
+- Validate staged checksums and attest provenance; keep build jobs read-only.
+- Run the installed release on Linux, Windows, and macOS after publication.
+- Exit evidence: required local checks, green CI for the release commit, successful tagged
+  release workflow, all eight binary/checksum assets, and passing installer smoke jobs.
+- Next release candidate: v6.10.0, including the admission ledger and dependency fixes.
+  Do not mark this phase complete until remote release evidence is available.
+
+## Phase 3: Maintainer operations (planned)
+
+- Improve audit inspection and actionable failure diagnostics without exposing secrets or
+  generated source content.
+- Document recovery from corrupted local audit state and preserve fail-closed submission.
+- Add regression coverage for consent revocation and exact-candidate review boundaries where
+  review identifies gaps; ship a separately verified release.
+
+## Phase 4: Adoption and support (planned)
+
+- Reconcile operator documentation with the current CLI and safe configuration defaults.
+- Exercise the documented onboarding path from clean installs on supported platforms.
+- Publish a support and compatibility matrix backed by CI evidence.
+
+Each phase requires focused commits, the repository's full verification suite, and a release
+with stated limitations. None enables unsolicited submissions, automatic merging, or CLA signing.
+
+---
+
+## Historical roadmap (archived)
+
+The text below records earlier planning and claims. It is not a current status report or
+permission to implement legacy automation. Current phases and the product contract take precedence.
+
+### Former project roadmap
 
 **Current Version:** 5.8.1 | **Release Date:** 2026-04-05 | **Status:** Active Development
 

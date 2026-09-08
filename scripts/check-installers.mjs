@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 const repositoryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
 function read(path) {
-  return readFileSync(join(repositoryRoot, path), "utf8");
+  return readFileSync(join(repositoryRoot, path), "utf8").replace(/\r\n/g, "\n");
 }
 
 function assert(condition, message) {
@@ -70,6 +70,24 @@ assert(
   releaseWorkflow.includes("installer-smoke:") &&
     releaseWorkflow.includes("needs: release"),
   "release workflow must smoke-test installers after every asset is published"
+);
+
+assert(
+  releaseWorkflow.includes("needs: build") &&
+    releaseWorkflow.includes("Smoke-test exact release binary") &&
+    releaseWorkflow.includes("cargo test --workspace --locked") &&
+    releaseWorkflow.includes("node scripts/check-release-assets.mjs"),
+  "publishing must wait for all tested binaries and verify staged checksums"
+);
+assert(
+  releaseWorkflow.includes("draft: true") &&
+    releaseWorkflow.includes('gh release edit "$RELEASE_TAG" --draft=false --latest'),
+  "release uploads must remain draft until all assets are uploaded"
+);
+const buildJob = releaseWorkflow.split("  build:\n")[1]?.split("  release:\n")[0];
+assert(
+  buildJob && !buildJob.includes("contents: write") && !buildJob.includes("action-gh-release@"),
+  "build jobs must not publish releases or hold repository write permission"
 );
 
 console.log("Installer contract passed for ContribAI v" + version + ".");
