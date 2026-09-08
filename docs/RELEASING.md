@@ -11,8 +11,9 @@ Cargo packages generate their own lockfile from the workspace dependency resolut
 
 1. Choose a semantic version and describe the user-visible changes, migration requirements,
    safety impact, and known limitations in [CHANGELOG.md](../CHANGELOG.md).
-2. Update the Rust crate version, the `contribai` entry in `Cargo.lock`, and the versions in
-   `install.sh` and `install.ps1` together. Do not update unrelated dependencies during a version bump.
+2. Update the Rust crate version and the `contribai` entry in `Cargo.lock` together. Installers
+   resolve the latest published release by default; release smoke jobs pin `CONTRIBAI_VERSION` to
+   the exact tag. Do not update unrelated dependencies during a version bump.
 3. Review the exact diff. Disclose AI assistance accurately; do not claim a human reviewed or
    verified work unless they did. Preserve existing local user changes outside the release commit.
 4. Run the required checks from the workspace root:
@@ -24,6 +25,7 @@ cargo test --workspace
 cargo build --workspace --release
 cargo audit --deny warnings
 node scripts/check-installers.mjs
+node --test scripts/test-installers.mjs
 node --test scripts/check-release-assets.test.mjs
 node scripts/check-site.mjs
 node --check site/app.js

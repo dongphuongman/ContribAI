@@ -166,6 +166,7 @@ jobs:
         shell: bash
         env:
           RELEASE_TAG: ${{ github.ref_name }}
+          CONTRIBAI_VERSION: ${{ github.ref_name }}
           CONTRIBAI_INSTALL_DIR: ${{ runner.temp }}/contribai-bin
         run: |
           bash ./install.sh
@@ -176,6 +177,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         env:
+          CONTRIBAI_VERSION: ${{ github.ref_name }}
           CONTRIBAI_INSTALL_DIR: ${{ runner.temp }}\contribai-bin
           CONTRIBAI_NO_PATH_UPDATE: "1"
           RELEASE_TAG: ${{ github.ref_name }}

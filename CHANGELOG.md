@@ -7,11 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-- Remove the obsolete member-level Cargo lockfile; the audited root workspace lockfile remains
-  the dependency source for builds, source installation, and generated Cargo packages.
+## [6.10.2] - 2026-09-09
 
-## [6.10.1] - 2026-09-08
+Includes the audit changes from the unpublished v6.10.1 candidate. That tag was retained after
+a parallel snapshot-test collision blocked its release; no v6.10.1 binaries were published.
+
+### Fixed
+- Isolate snapshot and LLM-cache test databases in unique temporary directories to prevent
+  parallel tests from sharing a timestamp-derived filename.
+- Remove the obsolete member-level Cargo lockfile; builds, source installs, and Cargo packages
+  use the audited workspace lockfile.
+- Install the latest published stable release by default so a candidate on main cannot break installs.
+- Support exact release pins through `CONTRIBAI_VERSION`; release smoke tests pin their own tag.
+- Use Bash in installation examples and preserve literal Windows installation paths.
+- Exercise installer failure handling and binary preservation in isolated cross-platform tests.
 
 ### Security
 - Verify the full retained admission audit chain in the same write transaction as each append.

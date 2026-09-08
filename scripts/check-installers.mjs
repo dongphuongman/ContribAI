@@ -28,12 +28,17 @@ assert(
   "workspace lockfile version does not match the crate"
 );
 assert(
-  shellInstaller.includes('VERSION="v' + version + '"'),
-  "install.sh version does not match the crate"
+  shellInstaller.includes('VERSION="${CONTRIBAI_VERSION:-}"') &&
+    powershellInstaller.includes('$Version = $env:CONTRIBAI_VERSION'),
+  "installers must support explicit version pins"
 );
 assert(
-  powershellInstaller.includes('$Version = "v' + version + '"'),
-  "install.ps1 version does not match the crate"
+  shellInstaller.includes('/releases/latest') && powershellInstaller.includes('/releases/latest'),
+  "ordinary installs must resolve a published release"
+);
+assert(
+  (releaseWorkflow.match(/CONTRIBAI_VERSION: \$\{\{ github.ref_name \}\}/g) || []).length === 2,
+  "both installer smoke steps must pin the exact release tag"
 );
 
 for (const asset of [

@@ -1,9 +1,28 @@
 #!/bin/bash
 set -euo pipefail
 
-VERSION="v6.10.1"
+VERSION="${CONTRIBAI_VERSION:-}"
 REPO="tang-vu/ContribAI"
 INSTALL_DIR="${CONTRIBAI_INSTALL_DIR:-/usr/local/bin}"
+
+# Resolve a public release independently of the version currently on main.
+if [ -z "$VERSION" ]; then
+  RELEASE_PREFIX="https://github.com/$REPO/releases/tag/"
+  if ! LATEST_TARGET=$(curl -fsSLI --proto '=https' --proto-redir '=https' \
+      --max-redirs 5 --connect-timeout 15 --max-time 60 -o /dev/null \
+      -w '%{url_effective}' "https://github.com/$REPO/releases/latest"); then
+    echo "Cannot resolve the latest published ContribAI release." >&2
+    exit 1
+  fi
+  case "$LATEST_TARGET" in
+    "$RELEASE_PREFIX"*) VERSION="${LATEST_TARGET#"$RELEASE_PREFIX"}" ;;
+    *) echo "Unexpected latest-release destination; refusing to install." >&2; exit 1 ;;
+  esac
+fi
+if [[ ! "$VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+  echo "CONTRIBAI_VERSION must be a release tag such as v6.10.0." >&2
+  exit 1
+fi
 
 # Detect OS and arch
 OS=$(uname -s | tr "[:upper:]" "[:lower:]")

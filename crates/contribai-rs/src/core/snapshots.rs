@@ -172,20 +172,15 @@ impl SnapshotManager {
 mod tests {
     use super::*;
 
-    fn temp_manager() -> SnapshotManager {
-        let path = std::env::temp_dir().join(format!(
-            "test_snapshots_{}.db",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        SnapshotManager::new(&path).unwrap()
+    fn temp_manager() -> (tempfile::TempDir, SnapshotManager) {
+        let directory = tempfile::tempdir().unwrap();
+        let mgr = SnapshotManager::new(&directory.path().join("snapshots.db")).unwrap();
+        (directory, mgr)
     }
 
     #[test]
     fn test_record_and_retrieve() {
-        let mgr = temp_manager();
+        let (_directory, mgr) = temp_manager();
         let snap = FileSnapshot {
             repo: "owner/repo".into(),
             path: "src/main.rs".into(),
@@ -207,7 +202,7 @@ mod tests {
 
     #[test]
     fn test_clear_repo() {
-        let mgr = temp_manager();
+        let (_directory, mgr) = temp_manager();
         let snap = FileSnapshot {
             repo: "owner/repo".into(),
             path: "src/main.rs".into(),
@@ -226,7 +221,7 @@ mod tests {
 
     #[test]
     fn test_count() {
-        let mgr = temp_manager();
+        let (_directory, mgr) = temp_manager();
         assert_eq!(mgr.count().unwrap(), 0);
 
         let snap = FileSnapshot {
