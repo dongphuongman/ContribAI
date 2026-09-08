@@ -7,7 +7,7 @@ GitHub token, or allow any network request. It does not generate or publish a co
 
 Use a release installer:
 
-    curl -fsSL https://raw.githubusercontent.com/tang-vu/ContribAI/main/install.sh | sh
+    curl -fsSL https://raw.githubusercontent.com/tang-vu/ContribAI/main/install.sh | bash
 
 On Windows PowerShell:
 
@@ -88,3 +88,33 @@ Then inspect consent on a repository you control or one whose maintainer already
 Neither command grants submission capability. A real draft proposal additionally requires explicit
 <code>--submit</code>, current maintainer consent, an exact base SHA, bounded scope, passing checks,
 evidence, and interactive human review.
+
+## Installation options
+
+Installers select GitHub's latest published stable release, independently of the version on `main`.
+Linux and macOS require Bash, curl, and either sha256sum or shasum. Windows supports Windows
+PowerShell 5.1 and PowerShell 7. Published binaries target Linux x86_64, Windows x86_64,
+macOS Intel, and macOS Apple Silicon; other targets require a source build.
+
+To pin an existing stable release on Linux or macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tang-vu/ContribAI/main/install.sh | CONTRIBAI_VERSION=v6.10.0 bash
+```
+
+On Windows:
+
+```powershell
+$env:CONTRIBAI_VERSION = 'v6.10.0'
+irm https://raw.githubusercontent.com/tang-vu/ContribAI/main/install.ps1 | iex
+Remove-Item Env:CONTRIBAI_VERSION
+```
+
+Pins accept exact stable tags in `vX.Y.Z` form and bypass latest-release lookup. Missing releases,
+lookup failures, and invalid checksums stop installation before replacing an existing binary.
+Set `CONTRIBAI_INSTALL_DIR` for a custom location. On Windows, set `CONTRIBAI_NO_PATH_UPDATE=1`
+when testing an isolated installation; invoke the installed executable by its full path.
+
+The installer and checksums are retrieved over HTTPS from this repository's release infrastructure.
+Checksum verification detects download mismatches; it does not independently establish provenance.
+For provenance verification, see [release artifact verification](RELEASING.md#verify-downloaded-artifacts).
