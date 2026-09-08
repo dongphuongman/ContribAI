@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-VERSION="v6.9.0"
+VERSION="v6.10.0"
 REPO="tang-vu/ContribAI"
 INSTALL_DIR="${CONTRIBAI_INSTALL_DIR:-/usr/local/bin}"
 

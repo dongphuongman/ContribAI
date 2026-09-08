@@ -16,11 +16,13 @@ Start with these documents:
 - [Security policy](../SECURITY.md) — supported versions and private reporting
 - [Governance](../GOVERNANCE.md) — decision process and project roles
 - [Contributing](../CONTRIBUTING.md) — code and AI-assistance requirements
+- [Releasing](RELEASING.md) — candidate verification, publication gates, and failure handling
+- [Current roadmap](project-roadmap.md) — delivery phases and their completion evidence
 
 ## Documentation status
 
-The files above are normative. Versioned planning documents such as `project-roadmap.md`,
-`project-changelog.md`, and `project-overview-pdr.md` are historical records; they may describe
+The files above are normative. The explicitly archived portion of `project-roadmap.md`, along with
+`project-changelog.md` and `project-overview-pdr.md`, contains historical records; these may describe
 capabilities or product language that no longer represents the safety contract.
 
 The maintained implementation is Rust under `crates/contribai-rs`. Python documentation exists

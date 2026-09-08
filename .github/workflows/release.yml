@@ -109,6 +109,14 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
+      - name: Refuse to overwrite a published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh api --paginate --slurp "repos/$GH_REPO/releases?per_page=100" > releases.json
+          node -e 'const releases=JSON.parse(require("fs").readFileSync("releases.json","utf8")).flat();if(releases.some(r=>r.tag_name===process.env.RELEASE_TAG&&!r.draft)){console.error("Release is already public; use a new version instead of replacing assets.");process.exit(1)}'
       - name: Download all staged assets
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:

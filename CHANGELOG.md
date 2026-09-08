@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.10.0] - 2026-09-08
+
 ### Added
 - Added a static-only Vercel deployment for the public onboarding site, including security response
   headers, deployment checks, maintainer setup documentation, and an evidence-backed Vercel OSS
@@ -18,12 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   verification; added the protected read-only `/api/admissions` endpoint and the read-only MCP
   `list_admission_audit` tool.
 - Added Prometheus admission decision counters by terminal result.
+- Documented the release procedure, provenance verification, and failure handling.
 
 ### Changed
 - Release publishing now waits for all four platform builds, workspace tests, and exact-binary
   safety demos; a single publisher verifies the complete asset set and checksums before upload.
   Uploads remain draft until complete. Build jobs no longer hold repository write or attestation
   permissions. Installer smoke checks cover all four platforms and require the tagged version.
+  Release reruns refuse to overwrite already-public versions.
 - Approved submissions now fail closed if their admission decision cannot be persisted to the local
   audit ledger.
 

@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param()
 
-$Version = "v6.9.0"
+$Version = "v6.10.0"
 $ErrorActionPreference = "Stop"
 $Repo = "tang-vu/ContribAI"
 $Binary = "contribai-$Version-windows-x86_64.exe"
