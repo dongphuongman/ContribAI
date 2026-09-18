@@ -12,8 +12,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tracing::info;
 
-use crate::core::admission::{AdmissionAuditRecord, AdmissionAuditVerification};
+use crate::core::admission::{AdmissionAuditRecord, AdmissionAuditVerification, ConsentSource};
 use crate::core::error::{ContribError, Result};
+use crate::core::run::{ContributionRun, RunEvent, RunState};
+
+/// Parse an RFC-3339 timestamp stored in the database.
+fn parse_db_time(value: &str) -> Result<chrono::DateTime<Utc>> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|t| t.with_timezone(&Utc))
+        .map_err(|e| ContribError::Database(format!("bad timestamp {value:?}: {e}")))
+}
 
 /// A single message in a PR conversation thread.
 pub struct ConversationMessage {
@@ -148,6 +156,44 @@ CREATE TABLE IF NOT EXISTS admission_audit (
     payload          TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS contribution_runs (
+    run_id                TEXT PRIMARY KEY,
+    repository            TEXT NOT NULL,
+    issue                 INTEGER,
+    base_sha              TEXT NOT NULL,
+    permit_id             TEXT,
+    consent_source        TEXT,
+    task_fingerprint      TEXT,
+    candidate_fingerprint TEXT,
+    review_fingerprint    TEXT,
+    review_decided_at     TEXT,
+    state                 TEXT NOT NULL,
+    repair_iterations     INTEGER DEFAULT 0,
+    reproduction          TEXT,
+    challenge_summary     TEXT,
+    draft_pr_number       INTEGER,
+    draft_pr_url          TEXT,
+    terminal_reason       TEXT,
+    solver_model          TEXT,
+    challenger_model      TEXT,
+    policy_version        INTEGER DEFAULT 1,
+    planner_version       INTEGER DEFAULT 1,
+    validator_version     INTEGER DEFAULT 1,
+    created_at            TEXT NOT NULL,
+    updated_at            TEXT NOT NULL,
+    expires_at            TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS run_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id      TEXT NOT NULL,
+    state_from  TEXT NOT NULL,
+    state_to    TEXT NOT NULL,
+    event       TEXT NOT NULL,
+    detail      TEXT DEFAULT '',
+    recorded_at TEXT NOT NULL
+);
+
 -- Indexes for hot query paths
 CREATE INDEX IF NOT EXISTS idx_submitted_prs_created_at ON submitted_prs(created_at);
 CREATE INDEX IF NOT EXISTS idx_submitted_prs_status ON submitted_prs(status);
@@ -159,6 +205,9 @@ CREATE INDEX IF NOT EXISTS idx_findings_cache_repo ON findings_cache(repo);
 CREATE INDEX IF NOT EXISTS idx_admission_audit_recorded_at ON admission_audit(recorded_at);
 CREATE INDEX IF NOT EXISTS idx_admission_audit_repo ON admission_audit(repository);
 CREATE INDEX IF NOT EXISTS idx_admission_audit_decision ON admission_audit(decision);
+CREATE INDEX IF NOT EXISTS idx_contribution_runs_repo ON contribution_runs(repository);
+CREATE INDEX IF NOT EXISTS idx_contribution_runs_state ON contribution_runs(state);
+CREATE INDEX IF NOT EXISTS idx_run_events_run ON run_events(run_id);
 "#;
 
 /// Persistent memory backed by SQLite.
@@ -612,6 +661,355 @@ impl Memory {
             valid: true,
             records_checked,
             first_invalid_receipt: None,
+        })
+    }
+
+    // ── Contribution runs ─────────────────────────────────────────────
+
+    /// Persist a newly created run. `run_id` is unique; a duplicate insert
+    /// fails rather than silently merging two runs.
+    pub fn insert_run(&self, run: &ContributionRun) -> Result<()> {
+        let db = self.lock_db()?;
+        db.execute(
+            "INSERT INTO contribution_runs
+             (run_id, repository, issue, base_sha, permit_id, consent_source,
+              task_fingerprint, candidate_fingerprint, review_fingerprint,
+              review_decided_at, state, repair_iterations, reproduction,
+              challenge_summary, draft_pr_number, draft_pr_url, terminal_reason,
+              solver_model, challenger_model, policy_version, planner_version,
+              validator_version, created_at, updated_at, expires_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)",
+            params![
+                run.run_id,
+                run.repository,
+                run.issue,
+                run.base_sha,
+                run.permit_id,
+                run.consent_source
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()
+                    .map_err(|e| ContribError::Database(format!("run consent encoding: {e}")))?,
+                run.task_fingerprint,
+                run.candidate_fingerprint,
+                run.review_fingerprint,
+                run.review_decided_at.map(|t| t.to_rfc3339()),
+                run.state.as_str(),
+                run.repair_iterations,
+                run.reproduction,
+                run.challenge_summary,
+                run.draft_pr_number,
+                run.draft_pr_url,
+                run.terminal_reason,
+                run.solver_model,
+                run.challenger_model,
+                run.policy_version,
+                run.planner_version,
+                run.validator_version,
+                run.created_at.to_rfc3339(),
+                run.updated_at.to_rfc3339(),
+                run.expires_at.to_rfc3339(),
+            ],
+        )
+        .map_err(|e| ContribError::Database(format!("run insert: {e}")))?;
+        Ok(())
+    }
+
+    /// Load a run by ID.
+    pub fn get_run(&self, run_id: &str) -> Result<Option<ContributionRun>> {
+        let db = self.lock_db()?;
+        Self::load_run_in(&db, run_id)
+    }
+
+    /// List runs newest-first, optionally filtered by repository and state.
+    pub fn list_runs(
+        &self,
+        repository: Option<&str>,
+        state: Option<RunState>,
+        limit: usize,
+    ) -> Result<Vec<ContributionRun>> {
+        let db = self.lock_db()?;
+        let state_str = state.map(|s| s.as_str());
+        let mut stmt = db
+            .prepare(
+                "SELECT run_id, repository, issue, base_sha, permit_id, consent_source,
+                        task_fingerprint, candidate_fingerprint, review_fingerprint,
+                        review_decided_at, state, repair_iterations, reproduction,
+                        challenge_summary, draft_pr_number, draft_pr_url, terminal_reason,
+                        solver_model, challenger_model, policy_version, planner_version,
+                        validator_version, created_at, updated_at, expires_at
+                 FROM contribution_runs
+                 WHERE (?1 IS NULL OR repository = ?1)
+                   AND (?2 IS NULL OR state = ?2)
+                 ORDER BY created_at DESC LIMIT ?3",
+            )
+            .map_err(|e| ContribError::Database(format!("run list query: {e}")))?;
+        let rows = stmt
+            .query_map(
+                params![repository, state_str, limit.clamp(1, 1000) as i64],
+                Self::run_from_row,
+            )
+            .map_err(|e| ContribError::Database(format!("run list map: {e}")))?;
+        let mut runs = Vec::new();
+        for row in rows {
+            runs.push(row.map_err(|e| ContribError::Database(format!("run row: {e}")))?);
+        }
+        Ok(runs)
+    }
+
+    /// Runs left in a non-terminal state — crash-recovery candidates.
+    pub fn list_interrupted_runs(&self) -> Result<Vec<ContributionRun>> {
+        let db = self.lock_db()?;
+        let mut stmt = db
+            .prepare(
+                "SELECT run_id, repository, issue, base_sha, permit_id, consent_source,
+                        task_fingerprint, candidate_fingerprint, review_fingerprint,
+                        review_decided_at, state, repair_iterations, reproduction,
+                        challenge_summary, draft_pr_number, draft_pr_url, terminal_reason,
+                        solver_model, challenger_model, policy_version, planner_version,
+                        validator_version, created_at, updated_at, expires_at
+                 FROM contribution_runs
+                 WHERE state NOT IN ('submitted','blocked','needs_authorization','failed','expired','cancelled')
+                 ORDER BY created_at ASC",
+            )
+            .map_err(|e| ContribError::Database(format!("interrupted runs query: {e}")))?;
+        let rows = stmt
+            .query_map([], Self::run_from_row)
+            .map_err(|e| ContribError::Database(format!("interrupted runs map: {e}")))?;
+        let mut runs = Vec::new();
+        for row in rows {
+            runs.push(row.map_err(|e| ContribError::Database(format!("run row: {e}")))?);
+        }
+        Ok(runs)
+    }
+
+    /// Persist a snapshot of run fields that changed outside a transition
+    /// (fingerprints, reproduction, challenge summary, draft PR identity).
+    pub fn update_run(&self, run: &ContributionRun) -> Result<()> {
+        let db = self.lock_db()?;
+        Self::update_run_in(&db, run)
+    }
+
+    /// Atomically validate and persist a lifecycle transition plus its event.
+    ///
+    /// The current state is re-read inside an immediate write transaction, so
+    /// a stale in-memory copy cannot move a run concurrently modified by
+    /// another operator or a recovered process. This is the only way state
+    /// may change — never a raw UPDATE from outside.
+    pub fn transition_run(
+        &self,
+        run_id: &str,
+        to: RunState,
+        event: &str,
+        detail: &str,
+    ) -> Result<(ContributionRun, RunEvent)> {
+        let mut db = self.lock_db()?;
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| ContribError::Database(format!("run transition begin: {e}")))?;
+        let mut run = Self::load_run_in(&tx, run_id)?
+            .ok_or_else(|| ContribError::Database(format!("run {run_id} does not exist")))?;
+        let run_event = run
+            .transition(to, event, detail, Utc::now())
+            .map_err(|error| ContribError::Database(format!("run transition denied: {error}")))?;
+        Self::update_run_in(&tx, &run)?;
+        Self::insert_event_in(&tx, &run_event)?;
+        tx.commit()
+            .map_err(|e| ContribError::Database(format!("run transition commit: {e}")))?;
+        Ok((run, run_event))
+    }
+
+    /// Ordered lifecycle events for a run.
+    pub fn get_run_events(&self, run_id: &str) -> Result<Vec<RunEvent>> {
+        let db = self.lock_db()?;
+        let mut stmt = db
+            .prepare(
+                "SELECT run_id, state_from, state_to, event, detail, recorded_at
+                 FROM run_events WHERE run_id = ?1 ORDER BY id ASC",
+            )
+            .map_err(|e| ContribError::Database(format!("run events query: {e}")))?;
+        let rows = stmt
+            .query_map(params![run_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            })
+            .map_err(|e| ContribError::Database(format!("run events map: {e}")))?;
+        let mut events = Vec::new();
+        for row in rows {
+            let (run_id, from, to, event, detail, recorded_at) =
+                row.map_err(|e| ContribError::Database(format!("run event row: {e}")))?;
+            events.push(RunEvent {
+                run_id,
+                state_from: RunState::parse(&from)
+                    .ok_or_else(|| ContribError::Database(format!("bad run state {from}")))?,
+                state_to: RunState::parse(&to)
+                    .ok_or_else(|| ContribError::Database(format!("bad run state {to}")))?,
+                event,
+                detail,
+                recorded_at: parse_db_time(&recorded_at)?,
+            });
+        }
+        Ok(events)
+    }
+
+    fn load_run_in(db: &Connection, run_id: &str) -> Result<Option<ContributionRun>> {
+        db.query_row(
+            "SELECT run_id, repository, issue, base_sha, permit_id, consent_source,
+                    task_fingerprint, candidate_fingerprint, review_fingerprint,
+                    review_decided_at, state, repair_iterations, reproduction,
+                    challenge_summary, draft_pr_number, draft_pr_url, terminal_reason,
+                    solver_model, challenger_model, policy_version, planner_version,
+                    validator_version, created_at, updated_at, expires_at
+             FROM contribution_runs WHERE run_id = ?1",
+            params![run_id],
+            Self::run_from_row,
+        )
+        .optional()
+        .map_err(|e| ContribError::Database(format!("run load: {e}")))
+    }
+
+    fn update_run_in(db: &Connection, run: &ContributionRun) -> Result<()> {
+        let updated = db
+            .execute(
+                "UPDATE contribution_runs SET
+                    repository = ?2, issue = ?3, base_sha = ?4, permit_id = ?5,
+                    consent_source = ?6, task_fingerprint = ?7,
+                    candidate_fingerprint = ?8, review_fingerprint = ?9,
+                    review_decided_at = ?10, state = ?11, repair_iterations = ?12,
+                    reproduction = ?13, challenge_summary = ?14,
+                    draft_pr_number = ?15, draft_pr_url = ?16, terminal_reason = ?17,
+                    solver_model = ?18, challenger_model = ?19, policy_version = ?20,
+                    planner_version = ?21, validator_version = ?22, created_at = ?23,
+                    updated_at = ?24, expires_at = ?25
+                 WHERE run_id = ?1",
+                params![
+                    run.run_id,
+                    run.repository,
+                    run.issue,
+                    run.base_sha,
+                    run.permit_id,
+                    run.consent_source
+                        .as_ref()
+                        .map(serde_json::to_string)
+                        .transpose()
+                        .map_err(|e| {
+                            ContribError::Database(format!("run consent encoding: {e}"))
+                        })?,
+                    run.task_fingerprint,
+                    run.candidate_fingerprint,
+                    run.review_fingerprint,
+                    run.review_decided_at.map(|t| t.to_rfc3339()),
+                    run.state.as_str(),
+                    run.repair_iterations,
+                    run.reproduction,
+                    run.challenge_summary,
+                    run.draft_pr_number,
+                    run.draft_pr_url,
+                    run.terminal_reason,
+                    run.solver_model,
+                    run.challenger_model,
+                    run.policy_version,
+                    run.planner_version,
+                    run.validator_version,
+                    run.created_at.to_rfc3339(),
+                    run.updated_at.to_rfc3339(),
+                    run.expires_at.to_rfc3339(),
+                ],
+            )
+            .map_err(|e| ContribError::Database(format!("run update: {e}")))?;
+        if updated == 0 {
+            return Err(ContribError::Database(format!(
+                "run {} does not exist",
+                run.run_id
+            )));
+        }
+        Ok(())
+    }
+
+    fn insert_event_in(db: &Connection, event: &RunEvent) -> Result<()> {
+        db.execute(
+            "INSERT INTO run_events (run_id, state_from, state_to, event, detail, recorded_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                event.run_id,
+                event.state_from.as_str(),
+                event.state_to.as_str(),
+                event.event,
+                event.detail,
+                event.recorded_at.to_rfc3339(),
+            ],
+        )
+        .map_err(|e| ContribError::Database(format!("run event insert: {e}")))?;
+        Ok(())
+    }
+
+    fn run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContributionRun> {
+        let consent_source: Option<String> = row.get(5)?;
+        let consent_source = consent_source
+            .map(|raw| serde_json::from_str::<ConsentSource>(&raw))
+            .transpose()
+            .map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    5,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?;
+        let state_raw: String = row.get(10)?;
+        let state = RunState::parse(&state_raw).ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                10,
+                rusqlite::types::Type::Text,
+                format!("unknown run state {state_raw}").into(),
+            )
+        })?;
+        let text = |idx: usize| -> rusqlite::Result<Option<chrono::DateTime<Utc>>> {
+            let raw: Option<String> = row.get(idx)?;
+            raw.map(|v| {
+                chrono::DateTime::parse_from_rfc3339(&v)
+                    .map(|t| t.with_timezone(&Utc))
+                    .map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            idx,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })
+            })
+            .transpose()
+        };
+        Ok(ContributionRun {
+            run_id: row.get(0)?,
+            repository: row.get(1)?,
+            issue: row.get(2)?,
+            base_sha: row.get(3)?,
+            permit_id: row.get(4)?,
+            consent_source,
+            task_fingerprint: row.get(6)?,
+            candidate_fingerprint: row.get(7)?,
+            review_fingerprint: row.get(8)?,
+            review_decided_at: text(9)?,
+            state,
+            repair_iterations: row.get(11)?,
+            reproduction: row.get(12)?,
+            challenge_summary: row.get(13)?,
+            draft_pr_number: row.get(14)?,
+            draft_pr_url: row.get(15)?,
+            terminal_reason: row.get(16)?,
+            solver_model: row.get(17)?,
+            challenger_model: row.get(18)?,
+            policy_version: row.get(19)?,
+            planner_version: row.get(20)?,
+            validator_version: row.get(21)?,
+            created_at: text(22)?.unwrap_or_else(Utc::now),
+            updated_at: text(23)?.unwrap_or_else(Utc::now),
+            expires_at: text(24)?.unwrap_or_else(Utc::now),
         })
     }
 
@@ -1510,6 +1908,7 @@ mod tests {
             receipt: String::new(),
             previous_receipt: None,
             repository: repository.to_string(),
+            run_id: None,
             contribution_fingerprint: "f".repeat(64),
             stage: AdmissionAuditStage::Admission,
             decision,
@@ -1780,5 +2179,131 @@ mod tests {
         assert!(!board.is_empty());
         // repo/a has 100% merge rate, should be first
         assert_eq!(board[0]["repo"], "repo/a");
+    }
+
+    // ── Contribution run persistence ─────────────────────────────────────
+
+    fn test_run() -> ContributionRun {
+        ContributionRun::new(
+            "owner/repo",
+            Some(7),
+            "0123456789abcdef0123456789abcdef01234567",
+            Utc::now() + Duration::hours(24),
+        )
+    }
+
+    #[test]
+    fn run_insert_load_roundtrip() {
+        let mem = test_memory();
+        let run = test_run();
+        mem.insert_run(&run).unwrap();
+        let loaded = mem.get_run(&run.run_id).unwrap().expect("run exists");
+        assert_eq!(loaded.run_id, run.run_id);
+        assert_eq!(loaded.repository, "owner/repo");
+        assert_eq!(loaded.issue, Some(7));
+        assert_eq!(loaded.state, RunState::Discovered);
+        // Duplicate run_id is rejected, never silently merged.
+        assert!(mem.insert_run(&run).is_err());
+    }
+
+    #[test]
+    fn transition_run_persists_state_and_event_atomically() {
+        let mem = test_memory();
+        let mut run = test_run();
+        run.permit_id = Some("1".repeat(24));
+        mem.insert_run(&run).unwrap();
+
+        let (run, event) = mem
+            .transition_run(
+                &run.run_id,
+                RunState::Authorized,
+                "authorize",
+                "permit issued",
+            )
+            .unwrap();
+        assert_eq!(run.state, RunState::Authorized);
+        assert_eq!(event.state_from, RunState::Discovered);
+
+        let loaded = mem.get_run(&run.run_id).unwrap().unwrap();
+        assert_eq!(loaded.state, RunState::Authorized);
+
+        let events = mem.get_run_events(&run.run_id).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event, "authorize");
+        assert_eq!(events[0].detail, "permit issued");
+    }
+
+    #[test]
+    fn invalid_transition_fails_closed_and_leaves_no_event() {
+        let mem = test_memory();
+        let run = test_run();
+        mem.insert_run(&run).unwrap();
+        // Discovered → Submitted is not a valid transition.
+        assert!(mem
+            .transition_run(&run.run_id, RunState::Submitted, "skip", "")
+            .is_err());
+        assert_eq!(
+            mem.get_run(&run.run_id).unwrap().unwrap().state,
+            RunState::Discovered
+        );
+        assert!(mem.get_run_events(&run.run_id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn stale_state_cannot_transition_twice() {
+        let mem = test_memory();
+        let mut run = test_run();
+        run.permit_id = Some("1".repeat(24));
+        mem.insert_run(&run).unwrap();
+        mem.transition_run(&run.run_id, RunState::Authorized, "a", "")
+            .unwrap();
+        // Second attempt: Authorized → Authorized is invalid.
+        assert!(mem
+            .transition_run(&run.run_id, RunState::Authorized, "a2", "")
+            .is_err());
+        let events = mem.get_run_events(&run.run_id).unwrap();
+        assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    fn interrupted_runs_lists_only_nonterminal() {
+        let mem = test_memory();
+        let mut active = test_run();
+        active.permit_id = Some("1".repeat(24));
+        mem.insert_run(&active).unwrap();
+        mem.transition_run(&active.run_id, RunState::Authorized, "a", "")
+            .unwrap();
+
+        // A second run needs a distinct id — different issue.
+        let done = ContributionRun::new(
+            "owner/repo",
+            Some(8),
+            "0123456789abcdef0123456789abcdef01234567",
+            Utc::now() + Duration::hours(24),
+        );
+        mem.insert_run(&done).unwrap();
+        mem.transition_run(&done.run_id, RunState::Cancelled, "cancel", "user")
+            .unwrap();
+
+        let interrupted = mem.list_interrupted_runs().unwrap();
+        assert_eq!(interrupted.len(), 1);
+        assert_eq!(interrupted[0].run_id, active.run_id);
+    }
+
+    #[test]
+    fn update_run_persists_fingerprints() {
+        let mem = test_memory();
+        let mut run = test_run();
+        mem.insert_run(&run).unwrap();
+        run.candidate_fingerprint = Some("c".repeat(64));
+        run.task_fingerprint = Some("t".repeat(64));
+        run.reproduction = Some("reproduced".into());
+        mem.update_run(&run).unwrap();
+        let loaded = mem.get_run(&run.run_id).unwrap().unwrap();
+        assert_eq!(
+            loaded.candidate_fingerprint.as_deref(),
+            Some("c".repeat(64).as_str())
+        );
+        assert_eq!(loaded.reproduction.as_deref(), Some("reproduced"));
     }
 }

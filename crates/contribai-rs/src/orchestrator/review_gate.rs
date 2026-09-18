@@ -137,6 +137,109 @@ impl HumanReviewer {
         println!();
         prompt_decision().await
     }
+
+    /// Review a run-bound candidate (evidence v3).
+    ///
+    /// Shows the exact candidate fingerprint alongside the run's task
+    /// binding, validation verdict, challenger outcome, and review-cost
+    /// surface. An approval binds the fingerprint shown — any post-review
+    /// change invalidates it at the write boundary.
+    pub async fn review_run_candidate(
+        &self,
+        contribution: &Contribution,
+        finding: &Finding,
+        repo_name: &str,
+        evidence: &crate::core::evidence_v3::EvidenceCapsuleV3,
+    ) -> Result<RunReviewDecision> {
+        if self.auto_approve {
+            info!(
+                run = %evidence.run_id,
+                "Trusted host approved run candidate"
+            );
+            return Ok(RunReviewDecision {
+                decision: ReviewDecision::new(ReviewAction::Approve),
+                approved_fingerprint: Some(evidence.contribution_fingerprint.clone()),
+            });
+        }
+
+        display_contribution(contribution, finding, repo_name);
+        println!();
+        println!("  Run               : {}", evidence.run_id);
+        println!("  Evidence permit   : {}", evidence.permit_id);
+        println!("  Base revision     : {}", evidence.base_sha);
+        println!("  Task fingerprint  : {}", evidence.task_fingerprint);
+        println!(
+            "  Candidate fingerprint: {}",
+            evidence.contribution_fingerprint
+        );
+        println!(
+            "  Review scope      : {} file(s), {} changed line(s)",
+            evidence.file_count, evidence.changed_lines
+        );
+        println!("  Validation verdict: {}", evidence.validation_verdict);
+        match &evidence.challenge {
+            Some(challenge) => println!(
+                "  Challenger        : {} ({}c/{}h/{}m/{}l unresolved)",
+                if challenge.completed {
+                    "ran"
+                } else {
+                    "NOT RUN"
+                },
+                challenge.unresolved_critical,
+                challenge.unresolved_high,
+                challenge.unresolved_medium,
+                challenge.unresolved_low
+            ),
+            None => println!("  Challenger        : NOT RUN"),
+        }
+        if let Some(repro) = &evidence.reproduction {
+            println!(
+                "  Reproduction      : {}",
+                if repro.reproduced {
+                    "reproduced at base"
+                } else {
+                    "attempted, not reproduced"
+                }
+            );
+        }
+        if evidence.repair_iterations > 0 {
+            println!("  Repair iterations : {}", evidence.repair_iterations);
+        }
+        if !evidence.review_surface_lines.is_empty() {
+            println!("  Review surface    :");
+            for line in &evidence.review_surface_lines {
+                println!("    - {line}");
+            }
+        }
+        println!("  Evidence expires  : {}", evidence.expires_at.to_rfc3339());
+        println!("  Submission        : draft PR only");
+        println!("  Evidence checks   :");
+        for check in &evidence.checks {
+            println!(
+                "    [{}] {}: {}",
+                if check.passed { "pass" } else { "FAIL" },
+                check.name,
+                check.details
+            );
+        }
+        println!();
+        let decision = prompt_decision().await?;
+        let approved_fingerprint = decision
+            .is_approved()
+            .then(|| evidence.contribution_fingerprint.clone());
+        Ok(RunReviewDecision {
+            decision,
+            approved_fingerprint,
+        })
+    }
+}
+
+/// Review decision for a run-bound candidate, carrying the exact candidate
+/// fingerprint the human approved (only present on approval).
+#[derive(Debug, Clone)]
+pub struct RunReviewDecision {
+    pub decision: ReviewDecision,
+    pub approved_fingerprint: Option<String>,
 }
 
 // ── Terminal display ───────────────────────────────────────────────────────────

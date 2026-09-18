@@ -15,8 +15,14 @@ pub async fn run_mcp_server(config_path: Option<&str>, allow_writes: bool) -> an
     let config = load_config(config_path)?;
     let github = create_github(&config)?;
     let memory = create_memory(&config)?;
+    let runs_root = config.run.resolved_runs_root(&config.storage);
 
-    contribai::mcp::server::run_stdio_server_with_capabilities(&github, &memory, allow_writes)
-        .await?;
+    contribai::mcp::server::run_stdio_server_with_capabilities(
+        &github,
+        &memory,
+        allow_writes,
+        &runs_root,
+    )
+    .await?;
     Ok(())
 }

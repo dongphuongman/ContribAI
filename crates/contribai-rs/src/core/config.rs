@@ -92,12 +92,90 @@ pub struct ContribAIConfig {
     pub sandbox: SandboxConfig,
     #[serde(default)]
     pub web: WebConfig,
+    /// ── Contribution Runs (v7) ──
+    #[serde(default)]
+    pub run: RunConfig,
     /// ── Plugin System (Sprint 16) ──
     #[serde(default)]
     pub plugins: Vec<PluginSpec>,
     /// ── Enterprise Mode (Sprint 16) ──
     #[serde(default)]
     pub enterprise: EnterpriseConfig,
+}
+
+/// Contribution-run (v7) configuration.
+///
+/// Every knob here tunes local execution only. Submission capability is
+/// never configurable — it requires the per-invocation `--submit` grant.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunConfig {
+    /// Root directory for isolated run workspaces and artifact files.
+    /// Empty means "next to `storage.db_path` under `runs/`".
+    #[serde(default)]
+    pub runs_root: String,
+    /// Maximum wall-clock lifetime of a single run, in seconds.
+    /// The run expires — it never silently continues past this bound.
+    #[serde(default = "default_run_ttl_seconds")]
+    pub run_ttl_seconds: u64,
+    /// Repair iterations allowed before the run blocks. Zero disables the
+    /// repair loop entirely (challenge concerns block immediately).
+    #[serde(default = "default_run_max_repair_iterations")]
+    pub max_repair_iterations: u32,
+    /// Per-command timeout for deterministic checks, in seconds.
+    #[serde(default = "default_run_command_timeout_secs")]
+    pub command_timeout_secs: u64,
+    /// Permit commands the safety classifier marks `requires_approval`
+    /// to execute inside run workspaces. Default off — fail closed.
+    #[serde(default)]
+    pub allow_approval_commands: bool,
+    /// Maximum files fetched into the base snapshot per run.
+    #[serde(default = "default_run_snapshot_file_limit")]
+    pub snapshot_file_limit: usize,
+}
+
+fn default_run_ttl_seconds() -> u64 {
+    2 * 60 * 60
+}
+fn default_run_max_repair_iterations() -> u32 {
+    2
+}
+fn default_run_command_timeout_secs() -> u64 {
+    120
+}
+fn default_run_snapshot_file_limit() -> usize {
+    200
+}
+
+impl Default for RunConfig {
+    fn default() -> Self {
+        Self {
+            runs_root: String::new(),
+            run_ttl_seconds: default_run_ttl_seconds(),
+            max_repair_iterations: default_run_max_repair_iterations(),
+            command_timeout_secs: default_run_command_timeout_secs(),
+            allow_approval_commands: false,
+            snapshot_file_limit: default_run_snapshot_file_limit(),
+        }
+    }
+}
+
+impl RunConfig {
+    /// Resolve the runs root, expanding `~`. Falls back to a `runs/`
+    /// directory beside the memory database when unset.
+    pub fn resolved_runs_root(&self, storage: &StorageConfig) -> PathBuf {
+        if !self.runs_root.trim().is_empty() {
+            if self.runs_root.starts_with("~/") || self.runs_root == "~" {
+                let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+                return home.join(&self.runs_root[2..]);
+            }
+            return PathBuf::from(&self.runs_root);
+        }
+        storage
+            .resolved_db_path()
+            .parent()
+            .map(|p| p.join("runs"))
+            .unwrap_or_else(|| PathBuf::from(".contribai/runs"))
+    }
 }
 
 /// Enterprise mode configuration.

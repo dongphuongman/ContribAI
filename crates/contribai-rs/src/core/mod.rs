@@ -1,8 +1,11 @@
 pub mod admission;
+pub mod challenge;
+pub mod command_safety;
 pub mod config;
 pub mod crypto;
 pub mod error;
 pub mod events;
+pub mod evidence_v3;
 pub mod i18n;
 pub mod leaderboard;
 pub mod logging;
@@ -14,7 +17,11 @@ pub mod profiles;
 pub mod prompt_sanitize;
 pub mod quotas;
 pub mod retry;
+pub mod review_surface;
+pub mod run;
 pub mod snapshots;
+pub mod task_spec;
+pub mod validation_graph;
 
 /// Truncate a string at a char boundary, never panicking.
 /// Returns a slice of at most `max_bytes` bytes, ending on a valid UTF-8 boundary.

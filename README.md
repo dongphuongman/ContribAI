@@ -162,11 +162,25 @@ contribai patrol
 contribai mcp-server
 ```
 
+To run the v7 contribution lifecycle against a maintainer-authorized issue:
+
+```bash
+contribai contribute owner/repo --issue 123 --dry-run
+contribai contribute owner/repo --issue 123
+contribai runs
+contribai inspect-run <run-id>
+contribai conformance
+```
+
+`--dry-run` executes through evidence packaging and stops: no review prompt, no external write.
+`conformance` runs the offline safety-invariant suite. `runs` and `inspect-run` are read-only.
+
 To request an admitted draft proposal:
 
 ```bash
 contribai target https://github.com/owner/repo --submit
 contribai solve https://github.com/owner/repo --submit
+contribai contribute owner/repo --issue 123 --submit
 ```
 
 `--submit` is necessary but not sufficient. The repository must opt in, every check must pass, and
@@ -260,6 +274,10 @@ The Python implementation under `python/` is legacy reference code. Rust under
 | Command | Default behavior | Explicit mutation capability |
 |---|---|---|
 | `demo [--json]` | Offline policy and evidence walkthrough | None |
+| `conformance [--json]` | Offline safety-invariant checks | None |
+| `contribute <repo> --issue <n>` | Run the contribution lifecycle for an authorized issue | `--submit` (`--dry-run` never writes) |
+| `runs [--json]` | List persisted contribution runs | None |
+| `inspect-run <id> [--json]` | Inspect one run's lifecycle and evidence | None |
 | `analyze <url>` | Analyze only | None |
 | `target <url>` | Analyze and prepare candidate | `--submit` |
 | `run` | Discover and assess | `--submit` |
@@ -295,9 +313,16 @@ Discovery ──► Analysis ──► Generation ──► Validation
 
 The main Rust modules are:
 
-- `core/admission.rs` — consent, permits, scope enforcement, evidence capsules
+- `core/admission.rs` — consent (schemas 1–2), permits, scope enforcement, evidence capsules
+- `core/run.rs` + `core/task_spec.rs` + `core/validation_graph.rs` + `core/challenge.rs` +
+  `core/review_surface.rs` — persisted run state machine, task understanding, deterministic check
+  evidence, adversarial challenge, review-cost surface
+- `core/command_safety.rs` — deterministic argv command classification
+- `core/evidence_v3.rs` — run-bound evidence capsule
 - `orchestrator/pipeline.rs` — read and write capability orchestration
-- `orchestrator/memory.rs` — outcomes, context, and append-only admission audit receipts
+- `orchestrator/run_executor.rs` — v7 contribution-run lifecycle driver
+- `orchestrator/memory.rs` — outcomes, run records/events, and append-only admission audit receipts
+- `exec/` — isolated workspace, bounded argv runner, ecosystem check adapters
 - `analysis/` — AST intelligence, triage, repository context, progressive skills
 - `generator/` — candidate generation, validation, risk, scoring, self-review
 - `github/` — resilient GitHub REST and GraphQL client
@@ -306,7 +331,8 @@ The main Rust modules are:
 - `web/` — local dashboard and authenticated remote API surface
 - `site/` — static public onboarding; no runtime API, analytics, cookies, or external dependencies
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for implementation details.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for implementation details and
+[docs/CONTRIBUTION_RUNS.md](docs/CONTRIBUTION_RUNS.md) for the run lifecycle.
 
 ## Configuration
 

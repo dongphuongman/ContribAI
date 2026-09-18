@@ -48,7 +48,11 @@ own output.
 | TOCTOU on default branch | permit records base SHA; fork branch starts at exact SHA | upstream may advance before review, requiring rebase |
 | Duplicate non-idempotent writes | POST/PATCH retries disabled; duplicate checks and memory | network ambiguity can still require manual reconciliation |
 | Credential disclosure | redacted config debug, bounded HTTP errors, gitignored secrets | external providers receive intentionally selected context |
-| Execution of malicious generated code | Docker validation option, timeouts, local/AST fallback disclosure | local/AST modes are not isolation; Docker is not a perfect sandbox |
+| Execution of malicious generated code | deterministic argv command classification, bounded workspace, timeouts, approval-gated non-safe commands | classification limits known-bad invocations; a determined candidate can still harm within an allowed test command |
+| Run-state forgery | persisted run states with guarded transitions; submission requires reviewed fingerprint equal to candidate fingerprint | a compromised local database or process can fabricate run records |
+| Challenger/repair collusion | solver and challenger are separate model calls; challenger verdict is evidence, not admission; deterministic checks re-run after repair | a model that both writes and reviews can still mislead if the operator trusts it uncritically |
+| Unbounded repair loops | `max_repair_iterations` bound; each repair re-enters deterministic validation | a bounded loop can still waste operator time before failing closed |
+| Workspace escape | canonical-path resolution, component-wise traversal rejection, canonicalized-root containment | symlink or OS-level quirks outside path validation remain possible |
 | MCP confused-deputy writes | read-only advertisement by default; explicit write mode; PR and CLA tools non-delegable | write-enabled MCP tools can mutate the operator's fork or existing PR state |
 | Legal impersonation | no automated CLA signing; human review identity | DCO/commit metadata still depends on operator configuration |
 | Unauthenticated dashboard exposure | localhost default; refuse non-loopback bind without API keys; optional TLS | reverse proxy and key management remain operator responsibilities |
@@ -72,9 +76,11 @@ and authorization to process private code. Local Ollama mode can reduce external
 not remove local execution or model-supply-chain risk.
 
 Persistent local data includes repository analysis, PR outcomes, admission audit metadata, working
-memory, caches, and event logs. Admission records exclude generated file contents but include
-repository names and changed paths. Operators should protect the ContribAI data directory as they
-would source-code metadata.
+memory, caches, event logs, and contribution-run records. Run state and lifecycle events persist in
+SQLite; run artifacts (permit, task spec, reproduction and validation output, challenge report,
+contribution, review surface, evidence capsule) persist under `run.runs_root`. Admission records
+exclude generated file contents but include repository names and changed paths. Operators should
+protect the ContribAI data directory as they would source-code metadata.
 
 Admission appends verify all retained receipts and indexed fields in one SQLite write transaction.
 Corruption or malformed payloads prevent appending, and approved submissions fail closed when

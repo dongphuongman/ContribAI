@@ -57,7 +57,10 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo build --workspace --release
+contribai conformance
 ```
+
+`contribai conformance` runs the offline safety-invariant suite; it must report zero failures.
 
 Additional expectations by change type:
 

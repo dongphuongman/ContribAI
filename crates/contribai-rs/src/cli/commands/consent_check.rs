@@ -132,9 +132,19 @@ mod tests {
             source: ConsentSource::RepositoryManifest {
                 path: ".github/contribai.yml".to_string(),
             },
+            schema_version: 1,
             max_files: 3,
             max_changed_lines: 120,
             allowed_paths: vec!["src/**".to_string()],
+            denied_paths: Vec::new(),
+            required_checks: Vec::new(),
+            allow_dependency_changes: true,
+            allow_new_files: true,
+            allow_test_changes: true,
+            required_reproduction: false,
+            execution_mode: contribai::core::admission::ExecutionMode::Local,
+            max_runtime_seconds: 900,
+            allowed_issue_labels: Vec::new(),
             draft_only: true,
         }
     }

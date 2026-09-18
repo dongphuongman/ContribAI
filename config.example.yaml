@@ -65,6 +65,16 @@ scheduler:
 storage:
   db_path: "~/.contribai/memory.db"
 
+# Contribution Runs (v7). Local execution only — submission always
+# requires the per-invocation `--submit` capability grant.
+run:
+  runs_root: ""               # default: runs/ beside storage.db_path
+  run_ttl_seconds: 7200       # a run expires beyond this; it never drifts
+  max_repair_iterations: 2    # bounded repair attempts before blocking
+  command_timeout_secs: 120   # per-command bound for deterministic checks
+  allow_approval_commands: false  # fail closed on unrecognized commands
+  snapshot_file_limit: 200    # base-revision files fetched per run
+
 quotas:
   github_daily: 1000
   llm_daily: 500

@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.0.0] - 2026-09-19
+
+### Added
+- Added the `ContributionRun` lifecycle: a persisted, inspectable execution unit that drives an
+  authorized issue through authorize → prepare → understand → reproduce → plan → solve →
+  validate → challenge → bounded repair → evidence → human review → submit, with fail-closed
+  `Blocked`, `NeedsAuthorization`, `Failed`, `Expired`, and `Cancelled` exits.
+- Added `contribai contribute <repo> --issue <n>` with `--dry-run`, `--submit`, and `--json`;
+  read-only `contribai runs` and `contribai inspect-run`; and offline `contribai conformance`
+  covering the deterministic safety core.
+- Added consent manifest schema 2: `denied_paths`, `required_checks`, `allow_dependency_changes`,
+  `allow_new_files`, `allow_test_changes`, `required_reproduction`, `execution_mode`,
+  `max_runtime_seconds`, and `allowed_issue_labels`. Schema-1 manifests keep prior semantics.
+- Added `EvidenceCapsuleV3`: run-bound evidence carrying task, candidate, and review
+  fingerprints, validation verdict, reproduction and challenge evidence, review surface, and
+  model labels. `PrManager::create_pr_with_evidence_v3` is the only run submission path and
+  revalidates capsule consistency, fingerprint equality, permit validity, and live consent.
+- Added an isolated workspace layer with bounded snapshot materialization at the attested base
+  SHA, a deterministic argv command-safety classifier (safe / approval-gated / forbidden), and
+  ecosystem check adapters for Cargo, npm, Go, and Python projects.
+- Added an independent challenger stage and bounded repair loop; every repair re-enters
+  deterministic validation.
+- Added persisted `contribution_runs` and `run_events` tables plus per-run JSON artifacts under
+  `run.runs_root`; audit records now carry `run_id` (schema 2, version-aware receipts).
+- Added read-only MCP run tools: `list_runs`, `inspect_run`, `get_run_evidence`,
+  `inspect_consent`, and `estimate_review_surface`.
+- Added the `run:` configuration section (`runs_root`, `run_ttl_seconds`, `max_repair_iterations`,
+  `command_timeout_secs`, `allow_approval_commands`, `snapshot_file_limit`). Submission remains an
+  invocation-level `--submit` grant and cannot be enabled from configuration.
+- Documented the run lifecycle in [docs/CONTRIBUTION_RUNS.md](docs/CONTRIBUTION_RUNS.md) and
+  updated the consent protocol, threat model, and architecture documents.
+
+### Security
+- Run submission requires the reviewed fingerprint to equal the candidate fingerprint, preventing
+  candidate substitution after human approval.
+- Validation is never vacuous: every run includes a required `admission_scope` policy check.
+- Schema-2 manifests can deny dependency changes, new files, test changes, and additional paths,
+  and can require named checks and reproduction evidence.
+- Command execution is bounded: forbidden programs never run, non-safe argv requires explicit
+  approval configuration, and timeouts cap every invocation.
+
 ## [6.10.2] - 2026-09-09
 
 Includes the audit changes from the unpublished v6.10.1 candidate. That tag was retained after

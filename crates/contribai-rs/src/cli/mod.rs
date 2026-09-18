@@ -284,6 +284,70 @@ enum Commands {
         submit: bool,
     },
 
+    /// Drive one maintainer-authorized issue through the full Contribution
+    /// Run lifecycle: consent → permit → workspace → task spec →
+    /// reproduction → solve → validate → challenge → repair → evidence →
+    /// human review → optional draft submission.
+    Contribute {
+        /// Repository URL or owner/repo
+        url: String,
+
+        /// Issue number to work on
+        #[arg(long)]
+        issue: i64,
+
+        /// Stop after evidence packaging — no review prompt, no writes
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Grant submission capability; draft PR still requires interactive
+        /// human approval of the exact candidate fingerprint
+        #[arg(long)]
+        submit: bool,
+
+        /// Emit a stable machine-readable run report
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List contribution runs (read-only)
+    Runs {
+        /// Filter by owner/repository
+        #[arg(short, long)]
+        repository: Option<String>,
+
+        /// Filter by state (e.g. ready_for_review, submitted, blocked)
+        #[arg(short, long)]
+        state: Option<String>,
+
+        /// Max runs to show
+        #[arg(short, long, default_value = "20")]
+        limit: usize,
+
+        /// Emit a stable JSON array
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Inspect one contribution run — fingerprints, checks, challenge,
+    /// review surface, and lifecycle events (read-only)
+    InspectRun {
+        /// Run id (run_…)
+        run_id: String,
+
+        /// Emit a stable machine-readable report
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Run the deterministic conformance checks against the safety core
+    /// (offline; no network or writes)
+    Conformance {
+        /// Emit a stable machine-readable report
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Show submitted PRs and their statuses
     Status {
         /// Filter by status (open, merged, closed)
@@ -560,6 +624,39 @@ impl Cli {
                 dry_run,
                 submit,
             } => commands::solve::run_solve(self.config.as_deref(), url, dry_run, submit).await,
+            Commands::Contribute {
+                url,
+                issue,
+                dry_run,
+                submit,
+                json,
+            } => {
+                commands::contribute::run_contribute(
+                    self.config.as_deref(),
+                    &url,
+                    issue,
+                    dry_run,
+                    submit,
+                    json,
+                )
+                .await
+            }
+            Commands::Runs {
+                repository,
+                state,
+                limit,
+                json,
+            } => commands::contribute::run_runs(
+                self.config.as_deref(),
+                repository.as_deref(),
+                state.as_deref(),
+                limit,
+                json,
+            ),
+            Commands::InspectRun { run_id, json } => {
+                commands::contribute::run_inspect_run(self.config.as_deref(), &run_id, json)
+            }
+            Commands::Conformance { json } => commands::conformance::run_conformance(json),
             Commands::McpServer { allow_writes } => {
                 commands::mcp_server::run_mcp_server(self.config.as_deref(), allow_writes).await
             }

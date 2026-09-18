@@ -45,8 +45,10 @@ are therefore:
 
 Current controls include deterministic admission policy, explicit write capabilities, repository
 consent, time-bounded permits, exact base-SHA branching, protected paths, draft-only PR creation,
-bounded error bodies, retry restrictions for non-idempotent requests, sandbox validation, secret
-redaction, MCP capability filtering, and refusal of unauthenticated public web binds.
+bounded error bodies, retry restrictions for non-idempotent requests, deterministic command
+classification, bounded workspace execution, an independent challenger stage, fingerprint-bound
+human review, run-bound evidence capsules, secret redaction, MCP capability filtering, and
+refusal of unauthenticated public web binds.
 
 See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for assumptions, abuse cases, and residual risk.
 

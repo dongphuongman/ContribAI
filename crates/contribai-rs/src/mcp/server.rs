@@ -25,6 +25,11 @@
 //! - get_pr_reviews
 //! - get_pr_comments
 //! - get_authenticated_user
+//! - list_runs
+//! - inspect_run
+//! - get_run_evidence
+//! - inspect_consent
+//! - estimate_review_surface
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -32,9 +37,12 @@ use std::io::{self, Write};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tracing::{error, info};
 
-use crate::core::admission::AdmissionAuditDecision;
+use crate::core::admission::{AdmissionAuditDecision, RepositoryConsent, CONSENT_PATHS};
+use crate::core::run::RunState;
 use crate::github::client::GitHubClient;
 use crate::orchestrator::memory::Memory;
+use crate::orchestrator::run_executor::RunArtifacts;
+use std::path::Path;
 
 const MUTATING_TOOLS: &[&str] = &[
     "fork_repo",
@@ -364,6 +372,64 @@ fn tool_definitions(allow_writes: bool) -> Vec<ToolDef> {
                 "properties": {}
             }),
         },
+        ToolDef {
+            name: "list_runs".into(),
+            description: "List contribution runs with state, fingerprints, and outcome (read-only)"
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "repository": {"type": "string", "description": "Optional owner/repo filter"},
+                    "state": {"type": "string", "description": "Optional run state filter"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 20}
+                }
+            }),
+        },
+        ToolDef {
+            name: "inspect_run".into(),
+            description: "Inspect one contribution run: fingerprints, challenge summary, review surface, lifecycle events (read-only)".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "run_id": {"type": "string", "description": "run_… identifier"}
+                },
+                "required": ["run_id"]
+            }),
+        },
+        ToolDef {
+            name: "get_run_evidence".into(),
+            description: "Get the packaged evidence capsule and validation graph for a run (read-only)".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "run_id": {"type": "string", "description": "run_… identifier"}
+                },
+                "required": ["run_id"]
+            }),
+        },
+        ToolDef {
+            name: "inspect_consent".into(),
+            description: "Check whether a repository publishes maintainer contribution consent (manifest or approval label), without writing".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "owner": {"type": "string"},
+                    "repo": {"type": "string"}
+                },
+                "required": ["owner", "repo"]
+            }),
+        },
+        ToolDef {
+            name: "estimate_review_surface".into(),
+            description: "Estimate maintainer review cost for a run's candidate (read-only)".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "run_id": {"type": "string", "description": "run_… identifier"}
+                },
+                "required": ["run_id"]
+            }),
+        },
     ];
 
     tools
@@ -383,7 +449,7 @@ pub fn advertised_tool_names(allow_writes: bool) -> Vec<String> {
 
 /// Run the MCP server on stdio (JSON-RPC over stdin/stdout).
 pub async fn run_stdio_server(github: &GitHubClient, memory: &Memory) -> anyhow::Result<()> {
-    run_stdio_server_with_capabilities(github, memory, false).await
+    run_stdio_server_with_capabilities(github, memory, false, Path::new(".contribai/runs")).await
 }
 
 /// Run MCP with an explicit capability grant. The default entry point is read-only.
@@ -391,6 +457,7 @@ pub async fn run_stdio_server_with_capabilities(
     github: &GitHubClient,
     memory: &Memory,
     allow_writes: bool,
+    runs_root: &Path,
 ) -> anyhow::Result<()> {
     let reader = BufReader::new(tokio::io::stdin());
     let mut lines = reader.lines();
@@ -445,7 +512,16 @@ pub async fn run_stdio_server_with_capabilities(
                     .cloned()
                     .unwrap_or(json!({}));
 
-                match handle_tool_call(tool_name, &arguments, github, memory, allow_writes).await {
+                match handle_tool_call(
+                    tool_name,
+                    &arguments,
+                    github,
+                    memory,
+                    allow_writes,
+                    runs_root,
+                )
+                .await
+                {
                     Ok(result) => JsonRpcResponse::success(
                         id,
                         json!({
@@ -495,6 +571,7 @@ async fn handle_tool_call(
     github: &GitHubClient,
     memory: &Memory,
     allow_writes: bool,
+    runs_root: &Path,
 ) -> anyhow::Result<Value> {
     if NON_DELEGABLE_TOOLS.contains(&name) {
         anyhow::bail!(
@@ -892,6 +969,118 @@ async fn handle_tool_call(
             Ok(json!(user))
         }
 
+        "list_runs" => {
+            let repository = args["repository"]
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let state = args["state"]
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| {
+                    RunState::parse(value)
+                        .ok_or_else(|| anyhow::anyhow!("unknown run state '{value}'"))
+                })
+                .transpose()?;
+            let limit = args["limit"].as_u64().unwrap_or(20).clamp(1, 1000) as usize;
+            let runs = memory.list_runs(repository, state, limit)?;
+            Ok(json!(runs))
+        }
+
+        "inspect_run" => {
+            let run_id = require_str("run_id")?;
+            let run = memory
+                .get_run(run_id)?
+                .ok_or_else(|| anyhow::anyhow!("run {run_id} does not exist"))?;
+            let events = memory.get_run_events(run_id)?;
+            let artifacts = RunArtifacts::load(runs_root, run_id).ok();
+            Ok(json!({
+                "run": run,
+                "events": events,
+                "task_spec": artifacts.as_ref().map(|a| &a.task_spec),
+                "reproduction": artifacts.as_ref().map(|a| &a.reproduction),
+                "challenge": artifacts.as_ref().map(|a| &a.challenge),
+                "review_surface": artifacts.as_ref().map(|a| &a.review_surface),
+            }))
+        }
+
+        "get_run_evidence" => {
+            let run_id = require_str("run_id")?;
+            memory
+                .get_run(run_id)?
+                .ok_or_else(|| anyhow::anyhow!("run {run_id} does not exist"))?;
+            let artifacts = RunArtifacts::load(runs_root, run_id)?;
+            Ok(json!({
+                "run_id": run_id,
+                "capsule": artifacts.capsule,
+                "validation": artifacts.validation,
+                "challenge": artifacts.challenge,
+                "review_surface": artifacts.review_surface,
+            }))
+        }
+
+        "inspect_consent" => {
+            let owner = require_str("owner")?;
+            let repo = require_str("repo")?;
+            let mut found = Vec::new();
+            for &path in CONSENT_PATHS {
+                match github.get_file_content(owner, repo, path, None).await {
+                    Ok(content) => {
+                        let parsed = RepositoryConsent::parse(path, &content);
+                        found.push(json!({
+                            "path": path,
+                            "present": true,
+                            "valid": parsed.is_some(),
+                            "consent": parsed.as_ref().map(|c| json!({
+                                "schema_version": c.schema_version,
+                                "max_files": c.max_files,
+                                "max_changed_lines": c.max_changed_lines,
+                                "allowed_paths": c.allowed_paths,
+                                "denied_paths": c.denied_paths,
+                                "required_checks": c.required_checks,
+                                "allow_dependency_changes": c.allow_dependency_changes,
+                                "allow_new_files": c.allow_new_files,
+                                "allow_test_changes": c.allow_test_changes,
+                                "required_reproduction": c.required_reproduction,
+                                "max_runtime_seconds": c.max_runtime_seconds,
+                                "draft_only": c.draft_only,
+                            })),
+                        }));
+                    }
+                    Err(_) => {
+                        found.push(json!({"path": path, "present": false}));
+                    }
+                }
+            }
+            let authorized = found
+                .iter()
+                .any(|entry| entry["valid"].as_bool().unwrap_or(false));
+            Ok(json!({
+                "repository": format!("{owner}/{repo}"),
+                "consent_authorized": authorized,
+                "manifests": found,
+            }))
+        }
+
+        "estimate_review_surface" => {
+            let run_id = require_str("run_id")?;
+            let run = memory
+                .get_run(run_id)?
+                .ok_or_else(|| anyhow::anyhow!("run {run_id} does not exist"))?;
+            let artifacts = RunArtifacts::load(runs_root, run_id).ok();
+            Ok(json!({
+                "run_id": run_id,
+                "state": run.state.as_str(),
+                "review_surface": artifacts.as_ref().map(|a| &a.review_surface),
+                "capsule": artifacts.as_ref().map(|a| a.capsule.as_ref().map(|c| json!({
+                    "file_count": c.file_count,
+                    "changed_lines": c.changed_lines,
+                    "validation_verdict": c.validation_verdict,
+                }))),
+            }))
+        }
+
         _ => {
             anyhow::bail!("Unknown tool: {}", name);
         }
@@ -906,7 +1095,7 @@ mod tests {
     fn read_only_tools_exclude_every_mutation() {
         let tools = tool_definitions(false);
         let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
-        assert_eq!(tools.len(), 13);
+        assert_eq!(tools.len(), 18);
         assert!(MUTATING_TOOLS.iter().all(|name| !names.contains(name)));
         assert!(names.contains(&"search_repos"), "missing search_repos");
         assert!(names.contains(&"get_repo_info"), "missing get_repo_info");
@@ -942,12 +1131,26 @@ mod tests {
             names.contains(&"get_authenticated_user"),
             "missing get_authenticated_user"
         );
+        assert!(names.contains(&"list_runs"), "missing list_runs");
+        assert!(names.contains(&"inspect_run"), "missing inspect_run");
+        assert!(
+            names.contains(&"get_run_evidence"),
+            "missing get_run_evidence"
+        );
+        assert!(
+            names.contains(&"inspect_consent"),
+            "missing inspect_consent"
+        );
+        assert!(
+            names.contains(&"estimate_review_surface"),
+            "missing estimate_review_surface"
+        );
     }
 
     #[test]
     fn explicit_write_mode_never_delegates_pr_creation_or_cla_signing() {
         let names = advertised_tool_names(true);
-        assert_eq!(names.len(), 20);
+        assert_eq!(names.len(), 25);
         assert!(!names.contains(&"create_pr".to_string()));
         assert!(!names.contains(&"sign_cla".to_string()));
     }

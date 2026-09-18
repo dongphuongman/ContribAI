@@ -95,7 +95,56 @@ impl<'a> PrManager<'a> {
         self.validate_evidence(contribution, target_repo, evidence)?;
         self.revalidate_consent(contribution, target_repo, evidence)
             .await?;
+        let pr_body = self.generate_pr_body(contribution, evidence);
+        self.execute_draft_write(contribution, target_repo, &evidence.base_sha, pr_body)
+            .await
+    }
 
+    /// Create a draft PR from a run-bound v3 evidence capsule.
+    ///
+    /// Stronger than the v2 path: the capsule must match the live
+    /// [`ContributionRun`] record — task binding, candidate fingerprint,
+    /// review binding, validation verdict, challenger outcome — and consent
+    /// is re-read live before any external write. A substituted or
+    /// post-review-mutated candidate fails closed before the fork is
+    /// touched.
+    pub async fn create_pr_with_evidence_v3(
+        &mut self,
+        contribution: &Contribution,
+        target_repo: &Repository,
+        evidence: &crate::core::evidence_v3::EvidenceCapsuleV3,
+        run: &crate::core::run::ContributionRun,
+        permit: &ContributionPermit,
+    ) -> Result<PrResult> {
+        evidence
+            .validate_for_submission(contribution, target_repo, run, permit, chrono::Utc::now())
+            .map_err(|violations| {
+                ContribError::PrCreation(format!(
+                    "evidence validation failed: {}",
+                    violations
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ))
+            })?;
+        self.revalidate_consent_v3(contribution, target_repo, evidence)
+            .await?;
+        let pr_body = self.generate_pr_body_v3(contribution, evidence);
+        self.execute_draft_write(contribution, target_repo, &evidence.base_sha, pr_body)
+            .await
+    }
+
+    /// Shared write tail: fork → branch at attested base → commits → draft
+    /// PR. Only reached after evidence validation and live consent
+    /// revalidation have passed.
+    async fn execute_draft_write(
+        &mut self,
+        contribution: &Contribution,
+        target_repo: &Repository,
+        base_sha: &str,
+        pr_body: String,
+    ) -> Result<PrResult> {
         let user = self.get_user().await?;
         let username = user["login"].as_str().unwrap_or("").to_string();
         let signoff = Self::build_signoff(user);
@@ -111,7 +160,7 @@ impl<'a> PrManager<'a> {
         };
 
         self.github
-            .create_branch_at_sha(&fork.owner, &fork.name, &branch, &evidence.base_sha)
+            .create_branch_at_sha(&fork.owner, &fork.name, &branch, base_sha)
             .await?;
 
         // 3. Commit all file changes
@@ -144,7 +193,6 @@ impl<'a> PrManager<'a> {
         }
 
         // 4. Create PR
-        let pr_body = self.generate_pr_body(contribution, evidence);
         let head = format!("{}:{}", fork.owner, branch);
 
         let pr_data = self
@@ -197,15 +245,15 @@ impl<'a> PrManager<'a> {
             })
     }
 
-    /// Re-read the maintainer-controlled authorization immediately before the
-    /// first external write and evaluate the exact reviewed contribution again.
-    async fn revalidate_consent(
+    /// Re-read the maintainer-controlled consent source and parse it into a
+    /// current [`RepositoryConsent`]. Fails closed when the source is gone,
+    /// revoked, or no longer parses.
+    async fn fetch_live_consent(
         &self,
-        contribution: &Contribution,
+        source: &ConsentSource,
         target_repo: &Repository,
-        evidence: &EvidenceCapsule,
-    ) -> Result<()> {
-        let consent = match &evidence.consent {
+    ) -> Result<RepositoryConsent> {
+        match source {
             ConsentSource::RepositoryManifest { path } => {
                 let content = self
                     .github
@@ -222,7 +270,7 @@ impl<'a> PrManager<'a> {
                         "repository consent was revoked or became invalid before submission"
                             .to_string(),
                     )
-                })?
+                })
             }
             ConsentSource::MaintainerLabel { issue, label } => {
                 let current_issue = self
@@ -252,10 +300,22 @@ impl<'a> PrManager<'a> {
                         "issue approval was revoked or became invalid before submission"
                             .to_string(),
                     )
-                })?
+                })
             }
-        };
+        }
+    }
 
+    /// Re-read the maintainer-controlled authorization immediately before the
+    /// first external write and evaluate the exact reviewed contribution again.
+    async fn revalidate_consent(
+        &self,
+        contribution: &Contribution,
+        target_repo: &Repository,
+        evidence: &EvidenceCapsule,
+    ) -> Result<()> {
+        let consent = self
+            .fetch_live_consent(&evidence.consent, target_repo)
+            .await?;
         let permit = ContributionPermit::issue(
             target_repo,
             evidence.base_sha.clone(),
@@ -269,6 +329,62 @@ impl<'a> PrManager<'a> {
                 "current maintainer consent does not authorize this contribution: {}",
                 report
                     .violations
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )));
+        }
+        Ok(())
+    }
+
+    /// Re-read live consent before a v3 write, re-evaluate the contribution
+    /// against the *current* policy, and re-check the run requirements
+    /// (named checks, reproduction) against the capsule's recorded evidence.
+    async fn revalidate_consent_v3(
+        &self,
+        contribution: &Contribution,
+        target_repo: &Repository,
+        evidence: &crate::core::evidence_v3::EvidenceCapsuleV3,
+    ) -> Result<()> {
+        let consent = self
+            .fetch_live_consent(&evidence.consent, target_repo)
+            .await?;
+        let permit = ContributionPermit::issue(
+            target_repo,
+            evidence.base_sha.clone(),
+            consent,
+            evidence.issue,
+        );
+        let report =
+            AdmissionController::evaluate(target_repo, contribution, &permit, chrono::Utc::now());
+        if !report.allowed {
+            return Err(ContribError::PrCreation(format!(
+                "current maintainer consent does not authorize this contribution: {}",
+                report
+                    .violations
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )));
+        }
+        // The live permit may name required checks the capsule must already
+        // have passed — consent that tightened since issuance fails closed.
+        let reproduced = evidence
+            .reproduction
+            .as_ref()
+            .map(|r| r.attempted && r.reproduced)
+            .unwrap_or(false);
+        let run_violations = crate::core::admission::evaluate_run_requirements(
+            &permit,
+            |name| evidence.checks.iter().any(|c| c.name == name && c.passed),
+            reproduced,
+        );
+        if !run_violations.is_empty() {
+            return Err(ContribError::PrCreation(format!(
+                "current run requirements are not satisfied: {}",
+                run_violations
                     .iter()
                     .map(ToString::to_string)
                     .collect::<Vec<_>>()
@@ -404,6 +520,70 @@ impl<'a> PrManager<'a> {
                 .unwrap_or(&contribution.description),
             files_list,
             evidence_markdown,
+            env!("CARGO_PKG_VERSION"),
+        )
+    }
+
+    /// PR body for a run-bound v3 capsule — same layout, evidence rendered
+    /// from the capsule's run-bound markdown.
+    fn generate_pr_body_v3(
+        &self,
+        contribution: &Contribution,
+        evidence: &crate::core::evidence_v3::EvidenceCapsuleV3,
+    ) -> String {
+        let finding = &contribution.finding;
+        let files_list: String = contribution
+            .changes
+            .iter()
+            .map(|change| ("change", change))
+            .chain(
+                contribution
+                    .tests_added
+                    .iter()
+                    .map(|change| ("test", change)),
+            )
+            .map(|(kind, change)| {
+                let operation = if change.is_new_file {
+                    "new"
+                } else {
+                    "modified"
+                };
+                format!("- `{}` ({operation}, {kind})", change.path)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let line_ref = finding
+            .line_start
+            .map(|l| format!(":L{}", l))
+            .unwrap_or_default();
+        format!(
+            "## Summary\n\n\
+             {}\n\n\
+             ## Problem\n\n\
+             **Severity**: `{:?}` | **File**: `{}{}`\n\n\
+             {}\n\n\
+             ## Solution\n\n\
+             {}\n\n\
+             ## Changes\n\n\
+             {}\n\n\
+             ## Testing\n\n\
+             - [ ] Existing tests pass\n\
+             - [ ] Manual review completed\n\
+             - [ ] No new warnings/errors introduced\n\n\
+             {}\n\n\
+             ---\n\
+             *Generated by [ContribAI](https://github.com/tang-vu/ContribAI) v{}*",
+            contribution.title,
+            finding.severity,
+            finding.file_path,
+            line_ref,
+            finding.description,
+            finding
+                .suggestion
+                .as_deref()
+                .unwrap_or(&contribution.description),
+            files_list,
+            evidence.to_markdown(),
             env!("CARGO_PKG_VERSION"),
         )
     }
@@ -948,9 +1128,19 @@ mod tests {
             source: ConsentSource::RepositoryManifest {
                 path: ".github/contribai.yml".to_string(),
             },
+            schema_version: 1,
             max_files: 5,
             max_changed_lines: 250,
             allowed_paths: vec!["src/**".to_string()],
+            denied_paths: Vec::new(),
+            required_checks: Vec::new(),
+            allow_dependency_changes: true,
+            allow_new_files: true,
+            allow_test_changes: true,
+            required_reproduction: false,
+            execution_mode: crate::core::admission::ExecutionMode::Local,
+            max_runtime_seconds: 900,
+            allowed_issue_labels: Vec::new(),
             draft_only: true,
         };
         let permit = ContributionPermit::issue(repository, TEST_SHA, consent, None);

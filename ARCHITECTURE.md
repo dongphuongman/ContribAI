@@ -31,20 +31,35 @@ legacy reference implementation.
   require `--respond`; the MCP server requires `--allow-writes`.
 - `orchestrator/pipeline.rs` coordinates discovery, analysis, generation, validation, admission,
   review, and optional publication.
-- `core/admission.rs` validates repository consent, issue-scoped approval, base revision,
-  protected paths, change budgets, and evidence.
+- `orchestrator/run_executor.rs` drives the v7 `ContributionRun` lifecycle through a
+  `RunEnvironment` boundary: authorize → prepare → understand → reproduce → plan → solve →
+  validate → challenge → bounded repair → evidence → human review → submit.
+- `core/run.rs`, `core/task_spec.rs`, `core/validation_graph.rs`, `core/challenge.rs`, and
+  `core/review_surface.rs` model the persisted run state machine, structured task understanding,
+  deterministic check evidence, adversarial challenge reports, and review-cost estimates.
+- `core/command_safety.rs` classifies execution commands as safe, approval-gated, or forbidden
+  before any local invocation.
+- `core/evidence_v3.rs` binds run identity, task/candidate/review fingerprints, reproduction,
+  validation, and challenge evidence into the submission capsule.
+- `core/admission.rs` validates repository consent (manifest schemas 1 and 2), issue-scoped
+  approval, base revision, protected and maintainer-denied paths, change budgets, dependency and
+  test-change policy, required checks, and evidence.
+- `exec/` materializes an isolated workspace snapshot, runs bounded argv commands under the
+  command-safety policy, and detects ecosystem check commands.
 - `analysis/` treats repository text as data and builds bounded code context.
 - `generator/` creates and scores candidate changes but has no independent publication authority.
 - `pr/manager.rs` recomputes evidence, revalidates live maintainer consent, and creates draft pull
   requests only.
 - `github/client.rs` centralizes GitHub I/O, retry classification, rate limits, and exact-SHA branch
   creation.
-- `orchestrator/memory.rs` stores local outcomes, short-lived working context, and integrity-linked
-  admission decision receipts in SQLite.
+- `orchestrator/memory.rs` stores local outcomes, short-lived working context, persisted run
+  records and lifecycle events, and integrity-linked admission decision receipts in SQLite.
 - `web/` is an observability API. It does not claim to queue runs; public binds require an API key.
-- `mcp/` exposes tools over stdio with read-only defaults.
+- `mcp/` exposes tools over stdio with read-only defaults, including run inspection tools.
 - `cli/commands/demo.rs` exercises the production consent, admission, and evidence policy against
   bundled values without loading configuration, credentials, network clients, or write capability.
+- `cli/commands/conformance.rs` runs offline deterministic checks over the safety core and fails if
+  any invariant regresses.
 - `site/` is a static public onboarding surface, not part of the runtime trust boundary. It has no
   backend, credentials, analytics, cookies, or write capability.
 
@@ -57,7 +72,8 @@ Every external contribution must satisfy all of these conditions:
    scoped consent.
 3. The target base commit SHA is captured before generation.
 4. Paths and patch size fit the repository's declared scope and built-in protected-path rules.
-5. Required validation checks pass and are recorded in an expiring `EvidenceCapsule`.
+5. Required validation checks pass and are recorded in a run-bound `EvidenceCapsuleV3` whose
+   candidate fingerprint equals the fingerprint the human reviews.
 6. A human reviews every proposed byte and approves the exact candidate interactively.
 7. The terminal decision is appended to the local audit ledger; an approval that cannot be recorded
    fails closed.

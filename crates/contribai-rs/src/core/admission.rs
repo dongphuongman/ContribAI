@@ -35,9 +35,37 @@ pub const MAINTAINER_APPROVAL_LABELS: &[&str] = &[
 const DEFAULT_MAX_FILES: usize = 5;
 const DEFAULT_MAX_CHANGED_LINES: usize = 250;
 const DEFAULT_PERMIT_TTL_HOURS: i64 = 24;
+const DEFAULT_MAX_RUNTIME_SECONDS: u64 = 900;
 const CONSENT_SCHEMA_VERSION: u8 = 1;
+const CONSENT_SCHEMA_VERSION_V2: u8 = 2;
 const EVIDENCE_SCHEMA_VERSION: u8 = 2;
 const ADMISSION_AUDIT_SCHEMA_VERSION: u8 = 1;
+const ADMISSION_AUDIT_SCHEMA_VERSION_V2: u8 = 2;
+
+/// Where a run's deterministic checks may execute.
+///
+/// Consenting to a proposal does not imply consenting to arbitrary local
+/// execution — but v6 already ran local sandbox validation, so `local` is the
+/// backward-compatible default. `off` disables command execution entirely
+/// (every command-dependent check is then recorded as skipped, never passed).
+/// `container` requires the container backend; it is not silently downgraded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionMode {
+    Off,
+    Local,
+    Container,
+}
+
+impl ExecutionMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Local => "local",
+            Self::Container => "container",
+        }
+    }
+}
 
 /// Source of the maintainer's consent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,38 +76,73 @@ pub enum ConsentSource {
 }
 
 /// Parsed repository-side consent and its review budget.
+///
+/// Schema 1 fields carry their v6 meaning exactly. Schema 2 adds the
+/// maintainer controls that cannot be expressed in schema 1; its defaults are
+/// restrictive (opt-in) so an incomplete manifest never widens permission.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepositoryConsent {
     pub source: ConsentSource,
+    /// Manifest schema that produced this consent (`1` or `2`). Label-derived
+    /// consent reports `1` — it predates the schema system.
+    pub schema_version: u8,
     pub max_files: usize,
     pub max_changed_lines: usize,
     #[serde(default)]
     pub allowed_paths: Vec<String>,
+    /// Additional maintainer deny-globs, evaluated after protected paths.
+    /// Schema 2 only; always empty for schema 1.
+    #[serde(default)]
+    pub denied_paths: Vec<String>,
+    /// Named validation checks that must appear and pass before admission.
+    /// Empty means "no specific checks required".
+    #[serde(default)]
+    pub required_checks: Vec<String>,
+    /// Whether dependency manifests/lockfiles may change. `true` for schema 1
+    /// (v6 allowed in-scope manifest edits); schema 2 defaults to `false`.
+    pub allow_dependency_changes: bool,
+    /// Whether new files may be added. `true` for schema 1; schema 2 keeps
+    /// `true` as the default since a contribution that cannot create files is
+    /// rarely useful — maintainers tighten it explicitly.
+    pub allow_new_files: bool,
+    /// Whether test files may change.
+    pub allow_test_changes: bool,
+    /// Whether the run must carry reproduction evidence to be admissible.
+    pub required_reproduction: bool,
+    /// Where deterministic checks may execute.
+    pub execution_mode: ExecutionMode,
+    /// Wall-clock bound for a single run.
+    pub max_runtime_seconds: u64,
+    /// Extra maintainer label names treated as approval labels for
+    /// issue-scoped consent. Schema 2 only.
+    #[serde(default)]
+    pub allowed_issue_labels: Vec<String>,
     pub draft_only: bool,
 }
 
 impl RepositoryConsent {
-    /// Parse the intentionally small consent manifest.
+    /// Parse the consent manifest.
     ///
-    /// A manifest is valid only when it contains `enabled: true`. Unknown fields
-    /// and unsupported schema versions fail closed so typos cannot widen scope.
+    /// A manifest is valid only when it contains `enabled: true`. Unknown
+    /// fields and unsupported schema versions fail closed so typos cannot
+    /// widen scope. A schema-1 manifest containing schema-2 fields is rejected
+    /// outright — the maintainer must declare `schema_version: 2`.
     pub fn parse(path: &str, content: &str) -> Option<Self> {
-        let manifest: ConsentManifest = serde_yaml::from_str(content).ok()?;
-        if !manifest.enabled
-            || manifest
-                .schema_version
-                .is_some_and(|version| version != CONSENT_SCHEMA_VERSION)
-        {
-            return None;
+        let probe: SchemaProbe = serde_yaml::from_str(content).ok()?;
+        match probe.schema_version.unwrap_or(CONSENT_SCHEMA_VERSION) {
+            CONSENT_SCHEMA_VERSION => Self::parse_v1(path, content),
+            CONSENT_SCHEMA_VERSION_V2 => Self::parse_v2(path, content),
+            _ => None,
         }
-        let max_files = manifest.max_files.unwrap_or(DEFAULT_MAX_FILES);
-        let max_changed_lines = manifest
-            .max_changed_lines
-            .unwrap_or(DEFAULT_MAX_CHANGED_LINES);
-        if max_files == 0 || max_changed_lines == 0 {
-            return None;
-        }
+    }
 
+    fn parse_v1(path: &str, content: &str) -> Option<Self> {
+        let manifest: ConsentManifest = serde_yaml::from_str(content).ok()?;
+        if !manifest.enabled {
+            return None;
+        }
+        let (max_files, max_changed_lines) =
+            budgets(manifest.max_files, manifest.max_changed_lines)?;
         let allowed_paths = manifest.allowed_paths.into_paths();
         if allowed_paths
             .iter()
@@ -87,20 +150,96 @@ impl RepositoryConsent {
         {
             return None;
         }
-
         Some(Self {
             source: ConsentSource::RepositoryManifest {
                 path: path.to_string(),
             },
+            schema_version: CONSENT_SCHEMA_VERSION,
             max_files,
             max_changed_lines,
             allowed_paths,
+            denied_paths: Vec::new(),
+            required_checks: Vec::new(),
+            // v6 had no dependency control; schema 1 preserves its semantics.
+            allow_dependency_changes: true,
+            allow_new_files: true,
+            allow_test_changes: true,
+            required_reproduction: false,
+            execution_mode: ExecutionMode::Local,
+            max_runtime_seconds: DEFAULT_MAX_RUNTIME_SECONDS,
+            allowed_issue_labels: Vec::new(),
+            draft_only: true,
+        })
+    }
+
+    fn parse_v2(path: &str, content: &str) -> Option<Self> {
+        let manifest: ConsentManifestV2 = serde_yaml::from_str(content).ok()?;
+        if !manifest.enabled {
+            return None;
+        }
+        let (max_files, max_changed_lines) =
+            budgets(manifest.max_files, manifest.max_changed_lines)?;
+        let allowed_paths = manifest.allowed_paths.into_paths();
+        let denied_paths = manifest.denied_paths.into_paths();
+        if allowed_paths
+            .iter()
+            .chain(denied_paths.iter())
+            .any(|pattern| !is_safe_allow_pattern(pattern))
+        {
+            return None;
+        }
+        // Denied paths must not include protected paths redundantly, but
+        // overlap is harmless — protected paths are checked first anyway.
+        let required_checks = manifest
+            .required_checks
+            .into_iter()
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty() && is_safe_check_name(name))
+            .collect::<Vec<_>>();
+        let allowed_issue_labels = manifest
+            .allowed_issue_labels
+            .into_iter()
+            .map(|label| label.trim().to_string())
+            .filter(|label| is_safe_label_name(label))
+            .collect::<Vec<_>>();
+        let max_runtime_seconds = manifest
+            .max_runtime_seconds
+            .unwrap_or(DEFAULT_MAX_RUNTIME_SECONDS);
+        if max_runtime_seconds == 0 || max_runtime_seconds > 86_400 {
+            return None;
+        }
+        Some(Self {
+            source: ConsentSource::RepositoryManifest {
+                path: path.to_string(),
+            },
+            schema_version: CONSENT_SCHEMA_VERSION_V2,
+            max_files,
+            max_changed_lines,
+            allowed_paths,
+            denied_paths,
+            required_checks,
+            allow_dependency_changes: manifest.allow_dependency_changes,
+            allow_new_files: manifest.allow_new_files.unwrap_or(true),
+            allow_test_changes: manifest.allow_test_changes.unwrap_or(true),
+            required_reproduction: manifest.required_reproduction,
+            execution_mode: manifest.execution_mode.unwrap_or(ExecutionMode::Local),
+            max_runtime_seconds,
+            allowed_issue_labels,
             draft_only: true,
         })
     }
 
     /// Construct consent from a maintainer-controlled issue label.
     pub fn from_issue(issue: &Issue) -> Option<Self> {
+        Self::from_issue_with_labels(issue, &[])
+    }
+
+    /// Label-derived consent, honoring manifest-extended label names.
+    ///
+    /// Label consent gets the conservative schema-1 profile: v6 semantics
+    /// plus the schema-2 restrictive default for dependency changes kept as
+    /// `true` for parity with schema 1.
+    pub fn from_issue_with_labels(issue: &Issue, extra_labels: &[String]) -> Option<Self> {
         if !issue.state.eq_ignore_ascii_case("open") {
             return None;
         }
@@ -108,23 +247,78 @@ impl RepositoryConsent {
             MAINTAINER_APPROVAL_LABELS
                 .iter()
                 .any(|allowed| label.eq_ignore_ascii_case(allowed))
+                || extra_labels
+                    .iter()
+                    .any(|allowed| label.eq_ignore_ascii_case(allowed))
         })?;
-        Some(Self {
+        Some(Self::from_label(issue.number, label))
+    }
+
+    /// Label-derived consent for a known issue number and label name.
+    /// Same conservative schema-1 profile as `from_issue_with_labels` —
+    /// the label only authorizes when it was verified upstream.
+    pub fn from_label(issue: i64, label: &str) -> Self {
+        Self {
             source: ConsentSource::MaintainerLabel {
-                issue: issue.number,
-                label: label.clone(),
+                issue,
+                label: label.to_string(),
             },
+            schema_version: CONSENT_SCHEMA_VERSION,
             max_files: DEFAULT_MAX_FILES,
             max_changed_lines: DEFAULT_MAX_CHANGED_LINES,
             allowed_paths: Vec::new(),
+            denied_paths: Vec::new(),
+            required_checks: Vec::new(),
+            allow_dependency_changes: true,
+            allow_new_files: true,
+            allow_test_changes: true,
+            required_reproduction: false,
+            execution_mode: ExecutionMode::Local,
+            max_runtime_seconds: DEFAULT_MAX_RUNTIME_SECONDS,
+            allowed_issue_labels: Vec::new(),
             draft_only: true,
-        })
+        }
     }
+}
+
+fn budgets(max_files: Option<usize>, max_changed_lines: Option<usize>) -> Option<(usize, usize)> {
+    let max_files = max_files.unwrap_or(DEFAULT_MAX_FILES);
+    let max_changed_lines = max_changed_lines.unwrap_or(DEFAULT_MAX_CHANGED_LINES);
+    if max_files == 0 || max_changed_lines == 0 {
+        return None;
+    }
+    Some((max_files, max_changed_lines))
+}
+
+/// A check name is a safe identifier the validation graph can carry.
+fn is_safe_check_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+}
+
+/// A label name a maintainer may add; conservative charset only.
+fn is_safe_label_name(label: &str) -> bool {
+    !label.is_empty()
+        && label.len() <= 64
+        && label
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ' ' | ':' | '/'))
+}
+
+#[derive(Debug, Deserialize)]
+struct SchemaProbe {
+    schema_version: Option<u8>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConsentManifest {
+    /// Retained so `deny_unknown_fields` still accepts the `schema_version`
+    /// key; dispatch happens in [`SchemaProbe`].
+    #[allow(dead_code)]
     schema_version: Option<u8>,
     #[serde(default)]
     enabled: bool,
@@ -132,6 +326,39 @@ struct ConsentManifest {
     max_changed_lines: Option<usize>,
     #[serde(default)]
     allowed_paths: AllowedPaths,
+}
+
+/// Schema 2 adds maintainer controls schema 1 cannot express. Every field is
+/// optional; every default is restrictive or matches schema-1 semantics.
+/// Unknown fields fail closed via `deny_unknown_fields`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConsentManifestV2 {
+    /// See [`ConsentManifest::schema_version`].
+    #[allow(dead_code)]
+    schema_version: Option<u8>,
+    #[serde(default)]
+    enabled: bool,
+    max_files: Option<usize>,
+    max_changed_lines: Option<usize>,
+    #[serde(default)]
+    allowed_paths: AllowedPaths,
+    #[serde(default)]
+    denied_paths: AllowedPaths,
+    #[serde(default)]
+    required_checks: Vec<String>,
+    /// Default `false`: dependency manifests and lockfiles are denied.
+    #[serde(default)]
+    allow_dependency_changes: bool,
+    allow_new_files: Option<bool>,
+    allow_test_changes: Option<bool>,
+    /// Default `false`: reproduction evidence is recommended, not required.
+    #[serde(default)]
+    required_reproduction: bool,
+    execution_mode: Option<ExecutionMode>,
+    max_runtime_seconds: Option<u64>,
+    #[serde(default)]
+    allowed_issue_labels: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -182,13 +409,47 @@ pub struct ContributionPermit {
     pub repository: String,
     pub base_sha: String,
     pub source: ConsentSource,
+    /// Consent schema that authorized this permit (1 or 2).
+    #[serde(default = "default_schema_version")]
+    pub consent_schema_version: u8,
     pub issue: Option<i64>,
     pub allowed_paths: Vec<String>,
+    /// Maintainer deny-globs evaluated after protected paths.
+    #[serde(default)]
+    pub denied_paths: Vec<String>,
+    /// Named checks the run must pass before admission.
+    #[serde(default)]
+    pub required_checks: Vec<String>,
+    #[serde(default = "default_true")]
+    pub allow_dependency_changes: bool,
+    #[serde(default = "default_true")]
+    pub allow_new_files: bool,
+    #[serde(default = "default_true")]
+    pub allow_test_changes: bool,
+    #[serde(default)]
+    pub required_reproduction: bool,
+    #[serde(default = "default_execution_mode")]
+    pub execution_mode: ExecutionMode,
+    #[serde(default = "default_max_runtime")]
+    pub max_runtime_seconds: u64,
     pub max_files: usize,
     pub max_changed_lines: usize,
     pub draft_only: bool,
     pub issued_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
+}
+
+fn default_schema_version() -> u8 {
+    CONSENT_SCHEMA_VERSION
+}
+fn default_true() -> bool {
+    true
+}
+fn default_execution_mode() -> ExecutionMode {
+    ExecutionMode::Local
+}
+fn default_max_runtime() -> u64 {
+    DEFAULT_MAX_RUNTIME_SECONDS
 }
 
 impl ContributionPermit {
@@ -204,8 +465,17 @@ impl ContributionPermit {
             repository: repository.full_name.clone(),
             base_sha: base_sha.into(),
             source: consent.source,
+            consent_schema_version: consent.schema_version,
             issue,
             allowed_paths: consent.allowed_paths,
+            denied_paths: consent.denied_paths,
+            required_checks: consent.required_checks,
+            allow_dependency_changes: consent.allow_dependency_changes,
+            allow_new_files: consent.allow_new_files,
+            allow_test_changes: consent.allow_test_changes,
+            required_reproduction: consent.required_reproduction,
+            execution_mode: consent.execution_mode,
+            max_runtime_seconds: consent.max_runtime_seconds,
             max_files: consent.max_files,
             max_changed_lines: consent.max_changed_lines,
             draft_only: consent.draft_only,
@@ -218,12 +488,20 @@ impl ContributionPermit {
 
     fn fingerprint(&self) -> String {
         let material = format!(
-            "v2\n{}\n{}\n{:?}\n{:?}\n{:?}\n{}\n{}\n{}\n{}\n{}",
+            "v3\n{}\n{}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
             self.repository,
             self.base_sha,
             self.source,
             self.issue,
             self.allowed_paths,
+            self.denied_paths,
+            self.required_checks,
+            self.allow_dependency_changes,
+            self.allow_new_files,
+            self.allow_test_changes,
+            self.required_reproduction,
+            self.execution_mode.as_str(),
+            self.max_runtime_seconds,
             self.max_files,
             self.max_changed_lines,
             self.draft_only,
@@ -244,13 +522,52 @@ pub enum AdmissionViolation {
     InvalidBaseRevision,
     PermitExpired,
     RepositoryMismatch,
-    TooManyFiles { actual: usize, maximum: usize },
-    TooManyChangedLines { actual: usize, maximum: usize },
-    ProtectedPath { path: String },
-    InvalidPath { path: String, reason: String },
-    DuplicatePath { path: String },
-    UnsupportedDeletion { path: String },
-    PathOutsidePermit { path: String },
+    TooManyFiles {
+        actual: usize,
+        maximum: usize,
+    },
+    TooManyChangedLines {
+        actual: usize,
+        maximum: usize,
+    },
+    ProtectedPath {
+        path: String,
+    },
+    InvalidPath {
+        path: String,
+        reason: String,
+    },
+    DuplicatePath {
+        path: String,
+    },
+    UnsupportedDeletion {
+        path: String,
+    },
+    PathOutsidePermit {
+        path: String,
+    },
+    /// Path matched a maintainer `denied_paths` glob (schema 2).
+    DeniedPath {
+        path: String,
+    },
+    /// Dependency manifest/lockfile change without `allow_dependency_changes`.
+    DependencyChangeNotAllowed {
+        path: String,
+    },
+    /// New file without `allow_new_files`.
+    NewFilesNotAllowed {
+        path: String,
+    },
+    /// Test-file change without `allow_test_changes`.
+    TestChangeNotAllowed {
+        path: String,
+    },
+    /// A `required_checks` entry did not pass (evaluated at run admission).
+    MissingRequiredCheck {
+        name: String,
+    },
+    /// `required_reproduction` set but no reproduction evidence exists.
+    ReproductionRequired,
 }
 
 impl std::fmt::Display for AdmissionViolation {
@@ -277,6 +594,24 @@ impl std::fmt::Display for AdmissionViolation {
                 write!(formatter, "file deletion is not supported: {path}")
             }
             Self::PathOutsidePermit { path } => write!(formatter, "path outside permit: {path}"),
+            Self::DeniedPath { path } => {
+                write!(formatter, "path denied by maintainer policy: {path}")
+            }
+            Self::DependencyChangeNotAllowed { path } => {
+                write!(formatter, "dependency change not authorized: {path}")
+            }
+            Self::NewFilesNotAllowed { path } => {
+                write!(formatter, "new files not authorized: {path}")
+            }
+            Self::TestChangeNotAllowed { path } => {
+                write!(formatter, "test changes not authorized: {path}")
+            }
+            Self::MissingRequiredCheck { name } => {
+                write!(formatter, "required check did not pass: {name}")
+            }
+            Self::ReproductionRequired => {
+                write!(formatter, "maintainer requires reproduction evidence")
+            }
         }
     }
 }
@@ -354,13 +689,32 @@ impl AdmissionController {
             }
             if is_protected_path(path) {
                 violations.push(AdmissionViolation::ProtectedPath { path: path.clone() });
-            } else if !permit.allowed_paths.is_empty()
-                && !permit
-                    .allowed_paths
+            } else {
+                if !permit.allowed_paths.is_empty()
+                    && !permit
+                        .allowed_paths
+                        .iter()
+                        .any(|pattern| path_matches(pattern, path))
+                {
+                    violations.push(AdmissionViolation::PathOutsidePermit { path: path.clone() });
+                }
+                if permit
+                    .denied_paths
                     .iter()
                     .any(|pattern| path_matches(pattern, path))
-            {
-                violations.push(AdmissionViolation::PathOutsidePermit { path: path.clone() });
+                {
+                    violations.push(AdmissionViolation::DeniedPath { path: path.clone() });
+                }
+            }
+            if !permit.allow_dependency_changes && is_dependency_path(path) {
+                violations
+                    .push(AdmissionViolation::DependencyChangeNotAllowed { path: path.clone() });
+            }
+            if !permit.allow_new_files && change.is_new_file {
+                violations.push(AdmissionViolation::NewFilesNotAllowed { path: path.clone() });
+            }
+            if !permit.allow_test_changes && is_test_path(path) {
+                violations.push(AdmissionViolation::TestChangeNotAllowed { path: path.clone() });
             }
         }
 
@@ -444,12 +798,20 @@ impl AdmissionAuditDecision {
 /// The record stores candidate metadata and hashes, never generated file contents. Receipts are
 /// linked to the preceding local record. This detects accidental edits and broken ordering when
 /// the complete local chain is verified; it is not a signature or remote attestation.
+///
+/// Schema 1 records verify against the original material. Schema 2 adds the
+/// `run_id` binding; v2 material covers it. Verification is version-aware so
+/// a v2 record can never be downgraded into a valid v1 receipt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdmissionAuditRecord {
     pub schema_version: u8,
     pub receipt: String,
     pub previous_receipt: Option<String>,
     pub repository: String,
+    /// Contribution Run this decision belongs to (schema 2). `None` for
+    /// pre-run-pipeline records.
+    #[serde(default)]
+    pub run_id: Option<String>,
     pub contribution_fingerprint: String,
     pub stage: AdmissionAuditStage,
     pub decision: AdmissionAuditDecision,
@@ -485,8 +847,33 @@ struct AdmissionAuditMaterial<'a> {
     recorded_at: DateTime<Utc>,
 }
 
+/// Schema-2 receipt material: identical to v1 plus `run_id`.
+#[derive(Serialize)]
+struct AdmissionAuditMaterialV2<'a> {
+    schema_version: u8,
+    previous_receipt: &'a Option<String>,
+    repository: &'a str,
+    run_id: &'a Option<String>,
+    contribution_fingerprint: &'a str,
+    stage: AdmissionAuditStage,
+    decision: AdmissionAuditDecision,
+    reason: &'a str,
+    base_sha: &'a Option<String>,
+    permit_id: &'a Option<String>,
+    issue: Option<i64>,
+    file_count: usize,
+    changed_lines: usize,
+    paths: &'a [String],
+    violations: &'a [AdmissionViolation],
+    checks: &'a [EvidenceCheck],
+    recorded_at: DateTime<Utc>,
+}
+
 impl AdmissionAuditRecord {
     /// Build an unsealed record for the local audit store.
+    ///
+    /// New records are written at schema 2 so they can carry the run binding.
+    /// Pre-run call sites pass `None` for `run_id`.
     #[allow(clippy::too_many_arguments)]
     pub fn from_attempt(
         repository: &Repository,
@@ -499,16 +886,45 @@ impl AdmissionAuditRecord {
         checks: Vec<EvidenceCheck>,
         recorded_at: DateTime<Utc>,
     ) -> Self {
+        Self::from_attempt_with_run(
+            repository,
+            contribution,
+            stage,
+            decision,
+            reason,
+            permit,
+            report,
+            checks,
+            recorded_at,
+            None,
+        )
+    }
+
+    /// Build an unsealed schema-2 record bound to a Contribution Run.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_attempt_with_run(
+        repository: &Repository,
+        contribution: &Contribution,
+        stage: AdmissionAuditStage,
+        decision: AdmissionAuditDecision,
+        reason: impl Into<String>,
+        permit: Option<&ContributionPermit>,
+        report: Option<&AdmissionReport>,
+        checks: Vec<EvidenceCheck>,
+        recorded_at: DateTime<Utc>,
+        run_id: Option<&str>,
+    ) -> Self {
         let changes: Vec<&FileChange> = contribution
             .changes
             .iter()
             .chain(contribution.tests_added.iter())
             .collect();
         Self {
-            schema_version: ADMISSION_AUDIT_SCHEMA_VERSION,
+            schema_version: ADMISSION_AUDIT_SCHEMA_VERSION_V2,
             receipt: String::new(),
             previous_receipt: None,
             repository: repository.full_name.clone(),
+            run_id: run_id.map(str::to_string),
             contribution_fingerprint: contribution_fingerprint(contribution),
             stage,
             decision,
@@ -541,9 +957,15 @@ impl AdmissionAuditRecord {
     }
 
     /// Recompute the record receipt from its stored fields.
+    ///
+    /// Versions 1 and 2 are both accepted; each verifies against its own
+    /// material so a stored v2 record cannot be weakened into a v1 receipt
+    /// by deleting `run_id`.
     pub fn verify_receipt(&self) -> bool {
-        self.schema_version == ADMISSION_AUDIT_SCHEMA_VERSION
-            && self.receipt.len() == 64
+        matches!(
+            self.schema_version,
+            ADMISSION_AUDIT_SCHEMA_VERSION | ADMISSION_AUDIT_SCHEMA_VERSION_V2
+        ) && self.receipt.len() == 64
             && self.receipt.bytes().all(|byte| byte.is_ascii_hexdigit())
             && self
                 .calculate_receipt()
@@ -551,25 +973,51 @@ impl AdmissionAuditRecord {
     }
 
     fn calculate_receipt(&self) -> std::result::Result<String, serde_json::Error> {
-        let material = AdmissionAuditMaterial {
-            schema_version: self.schema_version,
-            previous_receipt: &self.previous_receipt,
-            repository: &self.repository,
-            contribution_fingerprint: &self.contribution_fingerprint,
-            stage: self.stage,
-            decision: self.decision,
-            reason: &self.reason,
-            base_sha: &self.base_sha,
-            permit_id: &self.permit_id,
-            issue: self.issue,
-            file_count: self.file_count,
-            changed_lines: self.changed_lines,
-            paths: &self.paths,
-            violations: &self.violations,
-            checks: &self.checks,
-            recorded_at: self.recorded_at,
+        let encoded = match self.schema_version {
+            ADMISSION_AUDIT_SCHEMA_VERSION_V2 => {
+                let material = AdmissionAuditMaterialV2 {
+                    schema_version: self.schema_version,
+                    previous_receipt: &self.previous_receipt,
+                    repository: &self.repository,
+                    run_id: &self.run_id,
+                    contribution_fingerprint: &self.contribution_fingerprint,
+                    stage: self.stage,
+                    decision: self.decision,
+                    reason: &self.reason,
+                    base_sha: &self.base_sha,
+                    permit_id: &self.permit_id,
+                    issue: self.issue,
+                    file_count: self.file_count,
+                    changed_lines: self.changed_lines,
+                    paths: &self.paths,
+                    violations: &self.violations,
+                    checks: &self.checks,
+                    recorded_at: self.recorded_at,
+                };
+                serde_json::to_vec(&material)?
+            }
+            _ => {
+                let material = AdmissionAuditMaterial {
+                    schema_version: self.schema_version,
+                    previous_receipt: &self.previous_receipt,
+                    repository: &self.repository,
+                    contribution_fingerprint: &self.contribution_fingerprint,
+                    stage: self.stage,
+                    decision: self.decision,
+                    reason: &self.reason,
+                    base_sha: &self.base_sha,
+                    permit_id: &self.permit_id,
+                    issue: self.issue,
+                    file_count: self.file_count,
+                    changed_lines: self.changed_lines,
+                    paths: &self.paths,
+                    violations: &self.violations,
+                    checks: &self.checks,
+                    recorded_at: self.recorded_at,
+                };
+                serde_json::to_vec(&material)?
+            }
         };
-        let encoded = serde_json::to_vec(&material)?;
         Ok(hex::encode(Sha256::digest(encoded)))
     }
 }
@@ -605,7 +1053,9 @@ pub struct EvidenceCapsule {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceViolation {
-    UnsupportedSchema { actual: u8 },
+    UnsupportedSchema {
+        actual: u8,
+    },
     InvalidPermitId,
     RepositoryMismatch,
     MissingBaseRevision,
@@ -617,11 +1067,43 @@ pub enum EvidenceViolation {
     NotDraftOnly,
     InvalidConsentSource,
     MissingAdmissionCheck,
-    DuplicateCheck { name: String },
-    FailedCheck { name: String },
-    InvalidPath { path: String },
-    DuplicatePath { path: String },
-    UnsupportedDeletion { path: String },
+    DuplicateCheck {
+        name: String,
+    },
+    FailedCheck {
+        name: String,
+    },
+    InvalidPath {
+        path: String,
+    },
+    DuplicatePath {
+        path: String,
+    },
+    UnsupportedDeletion {
+        path: String,
+    },
+    /// Evidence belongs to a different run than the live record (v3).
+    RunBindingMismatch,
+    /// The run is not in an approved/submitted state (v3).
+    RunNotApproved,
+    /// Task spec fingerprint does not match the run record (v3).
+    TaskBindingMismatch,
+    /// Human approval does not cover the exact current candidate (v3).
+    ReviewBindingMismatch,
+    /// Required checks were skipped or absent — evidence incomplete (v3).
+    ValidationIncomplete,
+    /// A required deterministic check failed (v3).
+    ValidationFailed,
+    /// The adversarial challenger never ran (v3).
+    ChallengerNotRun,
+    /// Unresolved critical/high challenger findings remain (v3).
+    UnresolvedChallengeConcerns,
+    /// A named required check from the permit did not pass (v3).
+    MissingRequiredCheck {
+        name: String,
+    },
+    /// Required reproduction evidence is absent or negative (v3).
+    ReproductionMissing,
 }
 
 impl std::fmt::Display for EvidenceViolation {
@@ -662,6 +1144,45 @@ impl std::fmt::Display for EvidenceViolation {
             }
             Self::UnsupportedDeletion { path } => {
                 write!(formatter, "evidence contains unsupported deletion: {path}")
+            }
+            Self::RunBindingMismatch => {
+                write!(formatter, "evidence does not match the live run record")
+            }
+            Self::RunNotApproved => {
+                write!(formatter, "run is not in an approved state")
+            }
+            Self::TaskBindingMismatch => {
+                write!(
+                    formatter,
+                    "evidence task fingerprint does not match the run"
+                )
+            }
+            Self::ReviewBindingMismatch => {
+                write!(
+                    formatter,
+                    "human approval does not cover the exact current candidate"
+                )
+            }
+            Self::ValidationIncomplete => {
+                write!(formatter, "required validation evidence is incomplete")
+            }
+            Self::ValidationFailed => {
+                write!(formatter, "a required validation check failed")
+            }
+            Self::ChallengerNotRun => {
+                write!(formatter, "adversarial challenger never ran")
+            }
+            Self::UnresolvedChallengeConcerns => {
+                write!(
+                    formatter,
+                    "unresolved critical/high challenger findings remain"
+                )
+            }
+            Self::MissingRequiredCheck { name } => {
+                write!(formatter, "required check did not pass: {name}")
+            }
+            Self::ReproductionMissing => {
+                write!(formatter, "required reproduction evidence is missing")
             }
         }
     }
@@ -956,6 +1477,100 @@ pub fn changed_line_count(change: &FileChange) -> usize {
         + new_lines.len().saturating_sub(prefix + suffix)
 }
 
+/// Whether a path is a dependency manifest or lockfile. Used by the
+/// `allow_dependency_changes` policy and the review-surface estimator.
+pub fn is_dependency_path(path: &str) -> bool {
+    is_dependency_manifest(path) || is_lockfile(path)
+}
+
+/// Dependency manifests (not lockfiles) across supported ecosystems.
+pub fn is_dependency_manifest(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    matches!(
+        name,
+        "Cargo.toml"
+            | "package.json"
+            | "pnpm-workspace.yaml"
+            | "pyproject.toml"
+            | "setup.py"
+            | "setup.cfg"
+            | "requirements.txt"
+            | "go.mod"
+            | "pom.xml"
+            | "build.gradle"
+            | "build.gradle.kts"
+            | "Gemfile"
+            | "composer.json"
+            | "pubspec.yaml"
+            | "mix.exs"
+            | "Package.swift"
+            | "Package.resolved"
+    ) || name.ends_with(".csproj")
+        || name.ends_with(".fsproj")
+}
+
+/// Lockfiles — a lockfile-only diff is still a dependency change.
+pub fn is_lockfile(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    matches!(
+        name,
+        "Cargo.lock"
+            | "package-lock.json"
+            | "yarn.lock"
+            | "pnpm-lock.yaml"
+            | "bun.lockb"
+            | "bun.lock"
+            | "go.sum"
+            | "Gemfile.lock"
+            | "poetry.lock"
+            | "composer.lock"
+            | "pubspec.lock"
+    )
+}
+
+/// Whether a path looks like a test file (used by `allow_test_changes`).
+pub fn is_test_path(path: &str) -> bool {
+    let lowered = path.to_ascii_lowercase();
+    lowered.contains("/tests/")
+        || lowered.contains("/test/")
+        || lowered.contains("__tests__/")
+        || lowered.contains("/benches/")
+        || lowered.starts_with("tests/")
+        || lowered.starts_with("test/")
+        || lowered.ends_with("_test.rs")
+        || lowered.ends_with("_test.go")
+        || lowered.ends_with("_test.py")
+        || lowered.ends_with(".test.js")
+        || lowered.ends_with(".test.ts")
+        || lowered.ends_with(".spec.js")
+        || lowered.ends_with(".spec.ts")
+        || lowered.ends_with("test.rb")
+        || lowered.contains("/spec/")
+}
+
+/// Evaluate the permit requirements that need run evidence: named checks
+/// that must have passed and required reproduction evidence.
+///
+/// `check_passed` reports whether a named check exists in the validation
+/// graph and passed — a missing or skipped check never counts as passed.
+/// `reproduced` is the run's reproduction classification.
+pub fn evaluate_run_requirements(
+    permit: &ContributionPermit,
+    check_passed: impl Fn(&str) -> bool,
+    reproduced: bool,
+) -> Vec<AdmissionViolation> {
+    let mut violations = Vec::new();
+    for name in &permit.required_checks {
+        if !check_passed(name) {
+            violations.push(AdmissionViolation::MissingRequiredCheck { name: name.clone() });
+        }
+    }
+    if permit.required_reproduction && !reproduced {
+        violations.push(AdmissionViolation::ReproductionRequired);
+    }
+    violations
+}
+
 pub fn is_protected_path(path: &str) -> bool {
     let normalized = path.to_ascii_lowercase();
     let file_name = normalized.rsplit('/').next().unwrap_or(&normalized);
@@ -1119,9 +1734,19 @@ mod tests {
             source: ConsentSource::RepositoryManifest {
                 path: CONSENT_PATHS[0].to_string(),
             },
+            schema_version: 1,
             max_files: 5,
             max_changed_lines: 250,
             allowed_paths: paths.iter().map(|path| path.to_string()).collect(),
+            denied_paths: Vec::new(),
+            required_checks: Vec::new(),
+            allow_dependency_changes: true,
+            allow_new_files: true,
+            allow_test_changes: true,
+            required_reproduction: false,
+            execution_mode: ExecutionMode::Local,
+            max_runtime_seconds: 900,
+            allowed_issue_labels: Vec::new(),
             draft_only: true,
         }
     }
@@ -1167,9 +1792,10 @@ mod tests {
 
     #[test]
     fn manifest_rejects_unknown_schema_fields_and_unsafe_patterns() {
+        // Schema 2 is supported as of v7; versions beyond it fail closed.
         assert!(RepositoryConsent::parse(
             ".github/contribai.yml",
-            "schema_version: 2\nenabled: true",
+            "schema_version: 99\nenabled: true",
         )
         .is_none());
         assert!(RepositoryConsent::parse(
@@ -1463,5 +2089,239 @@ mod tests {
         assert!(json.contains("src/lib.rs"));
         assert!(!json.contains("private old"));
         assert!(!json.contains("private new"));
+    }
+
+    // ── Consent schema 2 ─────────────────────────────────────────────────
+
+    const V2_MANIFEST: &str = "\
+schema_version: 2
+enabled: true
+max_files: 8
+max_changed_lines: 400
+allowed_paths:
+  - src/**
+  - tests/**
+denied_paths:
+  - src/secrets/**
+required_checks: [cargo_test, cargo_clippy]
+allow_dependency_changes: false
+allow_new_files: false
+allow_test_changes: true
+required_reproduction: true
+execution_mode: local
+max_runtime_seconds: 600
+allowed_issue_labels: [contribai-v2-ready]
+";
+
+    fn v2_consent() -> RepositoryConsent {
+        RepositoryConsent::parse(CONSENT_PATHS[0], V2_MANIFEST)
+            .expect("schema-2 manifest should parse")
+    }
+
+    #[test]
+    fn schema2_manifest_parses_all_controls() {
+        let consent = v2_consent();
+        assert_eq!(consent.schema_version, 2);
+        assert_eq!(consent.max_files, 8);
+        assert_eq!(consent.denied_paths, vec!["src/secrets/**"]);
+        assert_eq!(consent.required_checks, vec!["cargo_test", "cargo_clippy"]);
+        assert!(!consent.allow_dependency_changes);
+        assert!(!consent.allow_new_files);
+        assert!(consent.allow_test_changes);
+        assert!(consent.required_reproduction);
+        assert_eq!(consent.execution_mode, ExecutionMode::Local);
+        assert_eq!(consent.max_runtime_seconds, 600);
+        assert_eq!(consent.allowed_issue_labels, vec!["contribai-v2-ready"]);
+    }
+
+    #[test]
+    fn schema1_manifest_keeps_v6_semantics() {
+        let consent = RepositoryConsent::parse(
+            CONSENT_PATHS[0],
+            "enabled: true\nmax_files: 2\nallowed_paths: src/**",
+        )
+        .unwrap();
+        assert_eq!(consent.schema_version, 1);
+        assert!(consent.allow_dependency_changes);
+        assert!(consent.denied_paths.is_empty());
+        assert_eq!(consent.execution_mode, ExecutionMode::Local);
+    }
+
+    #[test]
+    fn schema1_manifest_with_v2_fields_fails_closed() {
+        // denied_paths in a schema-1 manifest is an unknown field — the whole
+        // manifest must be rejected, never silently narrowed.
+        assert!(RepositoryConsent::parse(
+            CONSENT_PATHS[0],
+            "enabled: true\ndenied_paths: [src/**]",
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn schema2_rejects_unknown_fields_and_bad_versions() {
+        assert!(RepositoryConsent::parse(
+            CONSENT_PATHS[0],
+            "schema_version: 2\nenabled: true\nallow_magic: true",
+        )
+        .is_none());
+        assert!(
+            RepositoryConsent::parse(CONSENT_PATHS[0], "schema_version: 3\nenabled: true",)
+                .is_none()
+        );
+        assert!(RepositoryConsent::parse(
+            CONSENT_PATHS[0],
+            "schema_version: 2\nenabled: true\nmax_runtime_seconds: 0",
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn schema2_evaluate_denies_denied_dependency_newfile_paths() {
+        let repo = repository("owner/repo");
+        let consent = v2_consent();
+        let permit = ContributionPermit::issue(&repo, TEST_SHA, consent, None);
+
+        // denied_paths glob.
+        let mut c = contribution("src/secrets/keys.rs", None, "x");
+        let report = AdmissionController::evaluate(&repo, &c, &permit, Utc::now());
+        assert!(report.violations.contains(&AdmissionViolation::DeniedPath {
+            path: "src/secrets/keys.rs".into()
+        }));
+
+        // dependency manifest without allow_dependency_changes.
+        c = contribution("src/../Cargo.toml", None, "x");
+        c.changes[0].path = "Cargo.toml".to_string();
+        let report = AdmissionController::evaluate(&repo, &c, &permit, Utc::now());
+        assert!(report
+            .violations
+            .contains(&AdmissionViolation::DependencyChangeNotAllowed {
+                path: "Cargo.toml".into()
+            }));
+
+        // new file without allow_new_files.
+        c = contribution("src/new.rs", None, "x");
+        c.changes[0].is_new_file = true;
+        let report = AdmissionController::evaluate(&repo, &c, &permit, Utc::now());
+        assert!(report
+            .violations
+            .contains(&AdmissionViolation::NewFilesNotAllowed {
+                path: "src/new.rs".into()
+            }));
+    }
+
+    #[test]
+    fn schema1_permit_still_allows_in_scope_manifest_edit() {
+        let repo = repository("owner/repo");
+        let consent = consent(&["**"]);
+        let permit = ContributionPermit::issue(&repo, TEST_SHA, consent, None);
+        let c = contribution("Cargo.toml", Some("[package]\n"), "[package]\n# comment\n");
+        let report = AdmissionController::evaluate(&repo, &c, &permit, Utc::now());
+        assert!(report
+            .violations
+            .iter()
+            .all(|v| !matches!(v, AdmissionViolation::DependencyChangeNotAllowed { .. })));
+    }
+
+    #[test]
+    fn run_requirements_evaluate_checks_and_reproduction() {
+        let repo = repository("owner/repo");
+        let permit = ContributionPermit::issue(&repo, TEST_SHA, v2_consent(), None);
+
+        // Both required checks pass + reproduction evidence → clean.
+        let violations = evaluate_run_requirements(
+            &permit,
+            |name| matches!(name, "cargo_test" | "cargo_clippy"),
+            true,
+        );
+        assert!(violations.is_empty());
+
+        // Missing check fails closed — a check that never ran does not pass.
+        let violations = evaluate_run_requirements(&permit, |name| name == "cargo_test", true);
+        assert_eq!(
+            violations,
+            vec![AdmissionViolation::MissingRequiredCheck {
+                name: "cargo_clippy".into()
+            }]
+        );
+
+        // No reproduction evidence when required → violation.
+        let violations = evaluate_run_requirements(&permit, |_| true, false);
+        assert_eq!(violations, vec![AdmissionViolation::ReproductionRequired]);
+    }
+
+    #[test]
+    fn schema2_extends_issue_labels_via_manifest() {
+        let mut issue = issue_with_labels(7, &["contribai-v2-ready"]);
+        assert!(RepositoryConsent::from_issue(&issue).is_none());
+        let consent =
+            RepositoryConsent::from_issue_with_labels(&issue, &v2_consent().allowed_issue_labels)
+                .unwrap();
+        assert!(matches!(
+            consent.source,
+            ConsentSource::MaintainerLabel { issue: 7, .. }
+        ));
+        // Built-in labels still work without manifest extension.
+        issue.labels = vec!["contribai-approved".to_string()];
+        assert!(RepositoryConsent::from_issue(&issue).is_some());
+    }
+
+    fn issue_with_labels(number: i64, labels: &[&str]) -> Issue {
+        Issue {
+            number,
+            title: "issue".into(),
+            body: Some("body".into()),
+            labels: labels.iter().map(|l| l.to_string()).collect(),
+            state: "open".into(),
+            created_at: Some(Utc::now()),
+            html_url: String::new(),
+        }
+    }
+
+    #[test]
+    fn audit_v2_receipts_cover_run_id_and_verify_versioned() {
+        let repo = repository("owner/repo");
+        let c = contribution("src/lib.rs", None, "new");
+        let record_v2 = AdmissionAuditRecord::from_attempt_with_run(
+            &repo,
+            &c,
+            AdmissionAuditStage::Admission,
+            AdmissionAuditDecision::Approved,
+            "ok",
+            None,
+            None,
+            Vec::new(),
+            Utc::now(),
+            Some("run_abc123"),
+        )
+        .seal(None)
+        .unwrap();
+        assert!(record_v2.verify_receipt());
+        assert_eq!(record_v2.schema_version, 2);
+
+        // Tampering with run_id invalidates the receipt.
+        let mut tampered = record_v2.clone();
+        tampered.run_id = Some("run_evil".into());
+        assert!(!tampered.verify_receipt());
+
+        // A v1 record still verifies against v1 material.
+        let mut record_v1 = AdmissionAuditRecord::from_attempt(
+            &repo,
+            &c,
+            AdmissionAuditStage::Consent,
+            AdmissionAuditDecision::Blocked,
+            "no consent",
+            None,
+            None,
+            Vec::new(),
+            Utc::now(),
+        );
+        record_v1.schema_version = 1;
+        let record_v1 = record_v1.seal(None).unwrap();
+        assert!(record_v1.verify_receipt());
+        // But downgrading a v2 receipt by changing schema_version fails.
+        let mut downgraded = record_v2.clone();
+        downgraded.schema_version = 1;
+        assert!(!downgraded.verify_receipt());
     }
 }

@@ -84,6 +84,16 @@ pipeline:
 storage:
   db_path: "~/.contribai/memory.db"
 
+# Contribution Runs (v7). Local execution only — submission always
+# requires the per-invocation `--submit` capability grant.
+run:
+  runs_root: ""
+  run_ttl_seconds: 7200
+  max_repair_iterations: 2
+  command_timeout_secs: 120
+  allow_approval_commands: false
+  snapshot_file_limit: 200
+
 multi_model:
   enabled: false
   strategy: cost_optimized

@@ -5,6 +5,7 @@ pub mod dream_lock;
 pub mod memory;
 pub mod pipeline;
 pub mod review_gate;
+pub mod run_executor;
 pub mod sessions;
 
 pub use circuit_breaker::CircuitBreaker;

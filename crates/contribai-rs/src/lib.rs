@@ -15,6 +15,7 @@
 pub mod agents;
 pub mod analysis;
 pub mod core;
+pub mod exec;
 pub mod generator;
 pub mod github;
 pub mod issues;
