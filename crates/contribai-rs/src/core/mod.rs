@@ -9,6 +9,7 @@ pub mod evidence_v3;
 pub mod i18n;
 pub mod leaderboard;
 pub mod logging;
+pub mod materialization;
 pub mod middleware;
 pub mod models;
 pub mod permissions;
@@ -21,6 +22,7 @@ pub mod review_surface;
 pub mod run;
 pub mod snapshots;
 pub mod task_spec;
+pub mod unified_diff;
 pub mod validation_graph;
 
 /// Truncate a string at a char boundary, never panicking.

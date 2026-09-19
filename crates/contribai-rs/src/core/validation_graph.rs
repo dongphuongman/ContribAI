@@ -41,10 +41,24 @@ impl CheckResult {
     }
 }
 
+/// Canonical check-name form: lowercase, spaces/`:` collapsed to `_`.
+///
+/// Manifest `required_checks` entries (`cargo_test`) and adapter display
+/// names (`cargo test`) both resolve to this form, so a maintainer-named
+/// required check always matches the graph node that ran it.
+pub fn canonical_check_name(name: &str) -> String {
+    name.trim()
+        .to_lowercase()
+        .chars()
+        .map(|c| if c == ' ' || c == ':' { '_' } else { c })
+        .collect()
+}
+
 /// One node in the validation graph.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidationCheck {
     /// Stable check name, e.g. `cargo_test`, `npm_lint`, `scope_policy`.
+    /// Canonicalized at construction — see [`canonical_check_name`].
     pub name: String,
     /// Class grouping, e.g. `build`, `test`, `lint`, `typecheck`, `policy`,
     /// `reproduction`, `security`.
@@ -75,7 +89,7 @@ impl ValidationCheck {
     ) -> Self {
         let now = Utc::now();
         Self {
-            name: name.into(),
+            name: canonical_check_name(&name.into()),
             category: category.into(),
             mechanism,
             required,
@@ -161,7 +175,8 @@ impl ValidationGraph {
     }
 
     pub fn get(&self, name: &str) -> Option<&ValidationCheck> {
-        self.checks.iter().find(|check| check.name == name)
+        let canonical = canonical_check_name(name);
+        self.checks.iter().find(|check| check.name == canonical)
     }
 
     /// The deterministic verdict. Skipped required checks do not pass.

@@ -510,6 +510,19 @@ impl GitHubClient {
         repo: &str,
         branch: Option<&str>,
     ) -> Result<Vec<FileNode>> {
+        Ok(self.get_file_tree_verbose(owner, repo, branch).await?.0)
+    }
+
+    /// Get the full file tree plus the host's `truncated` flag.
+    ///
+    /// GitHub caps recursive tree responses; callers that materialize a
+    /// workspace must know whether the listing provably covered the tree.
+    pub async fn get_file_tree_verbose(
+        &self,
+        owner: &str,
+        repo: &str,
+        branch: Option<&str>,
+    ) -> Result<(Vec<FileNode>, bool)> {
         let branch = match branch {
             Some(b) => b.to_string(),
             None => {
@@ -525,8 +538,9 @@ impl GitHubClient {
             )
             .await?;
 
+        let truncated = data["truncated"].as_bool().unwrap_or(false);
         let tree = data["tree"].as_array().cloned().unwrap_or_default();
-        Ok(tree
+        let nodes = tree
             .into_iter()
             .map(|item| FileNode {
                 path: item["path"].as_str().unwrap_or("").to_string(),
@@ -534,7 +548,8 @@ impl GitHubClient {
                 size: item["size"].as_i64().unwrap_or(0),
                 sha: item["sha"].as_str().unwrap_or("").to_string(),
             })
-            .collect())
+            .collect();
+        Ok((nodes, truncated))
     }
 
     /// Get the content of a file from the repository.
