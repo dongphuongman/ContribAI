@@ -19,26 +19,32 @@ use async_trait::async_trait;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use std::collections::BTreeMap;
+
 use crate::core::admission::{
-    evaluate_run_requirements, is_full_commit_sha, AdmissionAuditDecision, AdmissionAuditRecord,
-    AdmissionAuditStage, AdmissionController, ContributionPermit, RepositoryConsent, CONSENT_PATHS,
-    MAINTAINER_APPROVAL_LABELS,
+    evaluate_run_requirements, is_full_commit_sha, repository_path_error, AdmissionAuditDecision,
+    AdmissionAuditRecord, AdmissionAuditStage, AdmissionController, ContributionPermit,
+    RepositoryConsent, CONSENT_PATHS, MAINTAINER_APPROVAL_LABELS,
 };
 use crate::core::challenge::{ChallengeFinding, ChallengeReport};
 use crate::core::error::{ContribError, Result};
 use crate::core::evidence_v3::{EvidenceCapsuleV3, ReproductionEvidence};
+use crate::core::materialization::{
+    materialization_gaps, BaseSnapshot, MaterializationReport, MaterializedWorkspace,
+};
 use crate::core::models::{
     Contribution, ContributionType, FileChange, Finding, PrResult, Repository,
 };
 use crate::core::review_surface::{ChangedFile, ReviewContext, ReviewSurface};
 use crate::core::run::{ContributionRun, RunState};
 use crate::core::task_spec::{TaskInputs, TaskSpec};
+use crate::core::unified_diff::{self, DiffBundle};
 use crate::core::validation_graph::{
     CheckMechanism, CheckResult, GraphVerdict, ValidationCheck, ValidationGraph,
 };
 use crate::exec::adapters;
 use crate::exec::runner::BoundedRunner;
-use crate::exec::workspace::RunWorkspace;
+use crate::exec::workspace::{RunWorkspace, WorkspaceView};
 use crate::orchestrator::memory::Memory;
 use crate::orchestrator::review_gate::RunReviewDecision;
 
@@ -87,6 +93,33 @@ pub struct SolverCandidate {
     pub tests_added: Vec<FileChange>,
 }
 
+/// Everything the challenger needs to attack the actual candidate —
+/// unified hunks, deterministic validation evidence, reproduction
+/// results, and bounded read access for surrounding context.
+pub struct ChallengeInput<'a> {
+    /// Unified hunks of the exact candidate under review.
+    pub diff: &'a DiffBundle,
+    /// The validation graph just produced for this candidate.
+    pub validation: &'a ValidationGraph,
+    /// Reproduction evidence (base leg plus candidate leg when run).
+    pub reproduction: Option<&'a ReproductionEvidence>,
+    /// Bounded read access to the materialized workspace.
+    pub workspace: WorkspaceView<'a>,
+}
+
+/// Everything the repair loop needs to fix the actual candidate.
+pub struct RepairRequest<'a> {
+    /// Unified hunks of the current (failing) candidate.
+    pub diff: &'a DiffBundle,
+    /// Challenger findings from the last report (all, resolved included —
+    /// the env decides which to act on).
+    pub findings: &'a [ChallengeFinding],
+    /// Failed required validation checks with bounded output excerpts.
+    pub failing_checks: Vec<&'a ValidationCheck>,
+    /// Bounded read access to the materialized workspace.
+    pub workspace: WorkspaceView<'a>,
+}
+
 /// External world the executor cannot derive locally.
 ///
 /// Production wires this to `GitHubClient`/`LlmProvider`/`HumanReviewer`/
@@ -106,51 +139,87 @@ pub trait RunEnvironment: Send + Sync {
     /// Attested base commit — a full SHA, never a moving ref.
     async fn attest_base_sha(&self, repo: &str, issue: Option<i64>) -> Result<String>;
 
-    /// Repository file snapshot at `base_sha` for workspace materialization.
-    async fn fetch_base_snapshot(
+    /// Repository file snapshot at `base_sha` — the materialization
+    /// fallback and context source. Every file not returned must be
+    /// accounted for in [`BaseSnapshot::skipped`]; `truncated` marks a
+    /// listing that provably did not cover the tree.
+    async fn fetch_base_snapshot(&self, repo: &str, base_sha: &str) -> Result<BaseSnapshot>;
+
+    /// Materialize the run workspace at the attested base SHA.
+    ///
+    /// The default writes the API snapshot — which may be incomplete.
+    /// Environments with git transport should override with a clone or
+    /// worktree: a truncated snapshot is not a valid test workspace. The
+    /// executor judges completeness itself via [`materialization_gaps`]
+    /// and blocks on missing in-scope files, manifests, or tests — the
+    /// environment cannot self-certify.
+    async fn materialize_workspace(
         &self,
         repo: &str,
         base_sha: &str,
-    ) -> Result<Vec<(String, Vec<u8>)>>;
+        runs_root: &Path,
+        run_id: &str,
+    ) -> Result<MaterializedWorkspace> {
+        let snapshot = self.fetch_base_snapshot(repo, base_sha).await?;
+        let workspace =
+            RunWorkspace::materialize(runs_root, run_id, base_sha, &snapshot.files).await?;
+        Ok(MaterializedWorkspace {
+            workspace,
+            report: MaterializationReport {
+                strategy: "snapshot".into(),
+                materialized_files: snapshot.files.len(),
+                skipped: snapshot.skipped,
+                truncated: snapshot.truncated,
+                gaps: Vec::new(),
+            },
+        })
+    }
 
     /// Maintainer-authored task inputs for the TaskSpec.
     async fn task_inputs(&self, repo: &str, issue: Option<i64>) -> Result<OwnedTaskInputs>;
 
-    /// Reproduction commands to run at base revision. Empty = no
-    /// reproduction surface (docs-only, environment cannot execute).
+    /// Reproduction commands to run at base revision — and again on the
+    /// candidate. The workspace view exposes the real materialized tree so
+    /// environments derive commands from what is actually present. Empty =
+    /// no reproduction surface (docs-only, environment cannot execute).
     async fn reproduction_commands(
         &self,
         _repo: &str,
         _spec: &TaskSpec,
+        _workspace: &WorkspaceView<'_>,
     ) -> Result<Vec<Vec<String>>> {
         Ok(Vec::new())
     }
 
-    /// Solver model produces the candidate.
+    /// Solver model produces the candidate. `workspace` is the bounded
+    /// read interface into the materialized tree — solvers get real file
+    /// contents, not just paths.
     async fn solve(
         &self,
         repo: &str,
         spec: &TaskSpec,
-        workspace_paths: &[String],
+        workspace: &WorkspaceView<'_>,
     ) -> Result<SolverCandidate>;
 
     /// Bounded repair: produce revised changes for unresolved findings.
+    /// The request carries the real current diff, the failing checks with
+    /// output excerpts, and read access to the workspace.
     async fn repair(
         &self,
         repo: &str,
         spec: &TaskSpec,
-        findings: &[ChallengeFinding],
-        workspace_paths: &[String],
+        request: &RepairRequest<'_>,
     ) -> Result<Vec<FileChange>>;
 
     /// Independent challenger produces adversarial findings for the
-    /// candidate's diff. The executor seals the report — the model cannot
+    /// candidate's *actual unified diff*, with validation evidence and
+    /// workspace context. The executor seals the report — the model cannot
     /// mark its own output complete.
     async fn challenge(
         &self,
         repo: &str,
         spec: &TaskSpec,
-        diff_summary: &str,
+        input: &ChallengeInput<'_>,
     ) -> Result<Vec<ChallengeFinding>>;
 
     /// Human review of the exact candidate + evidence.
@@ -215,6 +284,9 @@ pub struct RunArtifacts {
     /// The issued permit — reissuing would change id/expiry, so the exact
     /// issued permit is stored.
     pub permit: Option<ContributionPermit>,
+    /// How the workspace was materialized and how complete it is.
+    #[serde(default)]
+    pub materialization: Option<MaterializationReport>,
     pub task_spec: Option<TaskSpec>,
     pub reproduction: Option<ReproductionEvidence>,
     pub validation: Option<ValidationGraph>,
@@ -421,20 +493,44 @@ impl<'a> RunExecutor<'a> {
             )));
         }
 
-        let files = self
+        let mut artifacts = self.artifacts(run_id)?;
+        let permit = artifacts
+            .permit
+            .clone()
+            .ok_or_else(|| ContribError::Config("permit missing — run authorize first".into()))?;
+
+        let mut materialized = self
             .env
-            .fetch_base_snapshot(&run.repository, &run.base_sha)
+            .materialize_workspace(
+                &run.repository,
+                &run.base_sha,
+                &self.config.runs_root,
+                run_id,
+            )
             .await?;
-        let workspace =
-            RunWorkspace::materialize(&self.config.runs_root, run_id, &run.base_sha, &files)
-                .await?;
+        materialized.report.gaps = materialization_gaps(&materialized.report, &permit);
+        artifacts.materialization = Some(materialized.report.clone());
+        self.save_artifacts(run_id, &artifacts)?;
+
+        if !materialized.report.is_complete() {
+            let detail = format!(
+                "workspace is not a complete checkout of the attested base: {}",
+                materialized.report.gaps.join("; ")
+            );
+            self.terminal(run_id, RunState::Blocked, "prepare", &detail)?;
+            return Err(ContribError::Config(detail));
+        }
+
         self.memory.transition_run(
             run_id,
             RunState::Prepared,
             "prepare",
-            "workspace materialized",
+            &format!(
+                "workspace materialized ({} files via {})",
+                materialized.report.materialized_files, materialized.report.strategy
+            ),
         )?;
-        Ok(workspace)
+        Ok(materialized.workspace)
     }
 
     /// Build the structured task spec and bind its fingerprint to the run.
@@ -503,9 +599,10 @@ impl<'a> RunExecutor<'a> {
             .clone()
             .ok_or_else(|| ContribError::Config("permit missing — run authorize first".into()))?;
 
+        let workspace = RunWorkspace::open_existing(&self.config.runs_root, run_id)?;
         let commands = self
             .env
-            .reproduction_commands(&run.repository, &spec)
+            .reproduction_commands(&run.repository, &spec, &workspace.view())
             .await?;
 
         if commands.is_empty() {
@@ -514,6 +611,8 @@ impl<'a> RunExecutor<'a> {
                 reproduced: false,
                 mechanism: "no reproduction surface".into(),
                 output_digest: None,
+                commands: Vec::new(),
+                candidate: None,
             });
             run.reproduction = Some("no_surface".into());
         } else {
@@ -526,21 +625,35 @@ impl<'a> RunExecutor<'a> {
                     "attempting reproduction at base",
                 )?
                 .0;
-            let workspace = RunWorkspace::open_existing(&self.config.runs_root, run_id)?;
             let runner = self.runner_for(&workspace, &run, &permit);
 
             let mut reproduced = false;
             let mut last_digest = None;
             let mut mechanism = String::new();
             for argv in &commands {
-                let outcome = runner.run_indirect(argv, argv).await?;
                 mechanism = format!("command: {}", argv.join(" "));
-                last_digest = Some(outcome.output_digest.clone());
-                // Convention: a reproduction command "reproduces" the bug
-                // when it exits non-zero at base (the failing behavior is
-                // demonstrably present).
-                if outcome.gate == "ran" && !outcome.timed_out && !outcome.passed() {
-                    reproduced = true;
+                match runner.run_indirect(argv, argv).await {
+                    Ok(outcome) => {
+                        last_digest = Some(outcome.output_digest.clone());
+                        // Convention: a reproduction command "reproduces"
+                        // the bug when it exits non-zero at base (the
+                        // failing behavior is demonstrably present).
+                        if outcome.gate == "ran" && !outcome.timed_out && !outcome.passed() {
+                            reproduced = true;
+                        }
+                    }
+                    Err(error) => {
+                        // A command that cannot even spawn is recorded,
+                        // not propagated — the run reports honestly that
+                        // reproduction was attempted but did not run.
+                        mechanism = format!("command failed to spawn: {}", argv.join(" "));
+                        last_digest = None;
+                        tracing::warn!(
+                            run_id,
+                            error = %error,
+                            "reproduction command could not start"
+                        );
+                    }
                 }
             }
             artifacts.reproduction = Some(ReproductionEvidence {
@@ -548,12 +661,20 @@ impl<'a> RunExecutor<'a> {
                 reproduced,
                 mechanism,
                 output_digest: last_digest,
+                commands: commands.clone(),
+                candidate: None,
             });
             run.reproduction = Some(if reproduced {
                 "reproduced".into()
             } else {
                 "not_reproduced".into()
             });
+            // Reproduction commands legitimately write build/test
+            // artifacts (caches, bytecode) into the workspace — fold them
+            // into the expected state so the next stage does not flag the
+            // command's own output as a foreign edit.
+            let mut workspace = workspace;
+            workspace.checkpoint().await?;
         }
 
         if permit.required_reproduction
@@ -602,6 +723,10 @@ impl<'a> RunExecutor<'a> {
         let spec = artifacts.task_spec.clone().ok_or_else(|| {
             ContribError::Config("task spec missing — run understand first".into())
         })?;
+        let permit = artifacts
+            .permit
+            .clone()
+            .ok_or_else(|| ContribError::Config("permit missing — run authorize first".into()))?;
 
         let workspace = RunWorkspace::open_existing(&self.config.runs_root, run_id)?;
         if workspace.has_unexpected_changes().await? {
@@ -618,24 +743,45 @@ impl<'a> RunExecutor<'a> {
             .transition_run(run_id, RunState::Executing, "solve", "solver invoked")?
             .0;
 
-        let paths = workspace_files(&workspace);
-        let candidate = self.env.solve(&run.repository, &spec, &paths).await?;
-
-        // Apply the candidate inside the workspace through the path policy.
-        for change in candidate.changes.iter().chain(candidate.tests_added.iter()) {
-            if change.is_deleted {
-                return self.terminal(
-                    run_id,
-                    RunState::Blocked,
-                    "solve",
-                    "solver proposed a file deletion — not supported",
-                );
+        let mut candidate = match self
+            .env
+            .solve(&run.repository, &spec, &workspace.view())
+            .await
+        {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                // Solver transport/parse failure: record and fail closed
+                // rather than leave the run parked in `executing`.
+                let detail = format!("solver failed to produce a candidate: {error}");
+                self.terminal(run_id, RunState::Failed, "solve", &detail)?;
+                return Err(ContribError::Config(detail));
             }
-            workspace.write_file(&change.path, change.new_content.as_bytes())?;
-        }
-        let mut workspace = workspace;
-        workspace.checkpoint().await?;
+        };
 
+        // An empty candidate is not a contribution — fail closed rather
+        // than packaging evidence for a change that does not exist.
+        if candidate.changes.is_empty() && candidate.tests_added.is_empty() {
+            return self.terminal(
+                run_id,
+                RunState::Blocked,
+                "solve",
+                "solver produced no file changes",
+            );
+        }
+
+        // Verify and apply the candidate inside the workspace. Scope is
+        // evaluated BEFORE any write; preimages bind to what is actually
+        // on disk: a solver whose claimed base content does not match is
+        // working from hallucinated context and is rejected.
+        let prior_preimages = BTreeMap::new();
+        if let Err(reason) = bind_preimages(
+            &workspace,
+            &mut candidate.changes,
+            &mut candidate.tests_added,
+            &prior_preimages,
+        ) {
+            return self.terminal(run_id, RunState::Blocked, "solve", &reason);
+        }
         let contribution = Contribution {
             finding: candidate.finding,
             contribution_type: candidate.contribution_type,
@@ -647,6 +793,32 @@ impl<'a> RunExecutor<'a> {
             branch_name: String::new(),
             generated_at: Utc::now(),
         };
+        let repository = self.env.fetch_repository(&run.repository).await?;
+        let report = AdmissionController::evaluate(&repository, &contribution, &permit, Utc::now());
+        if !report.allowed {
+            let reason = report
+                .violations
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ");
+            return self.terminal(
+                run_id,
+                RunState::Blocked,
+                "solve",
+                &format!("candidate violates permit: {reason}"),
+            );
+        }
+        for change in contribution
+            .changes
+            .iter()
+            .chain(contribution.tests_added.iter())
+        {
+            workspace.write_file(&change.path, change.new_content.as_bytes())?;
+        }
+        let mut workspace = workspace;
+        workspace.checkpoint().await?;
+
         artifacts.contribution = Some(contribution.clone());
         self.save_artifacts(run_id, &artifacts)?;
 
@@ -675,7 +847,7 @@ impl<'a> RunExecutor<'a> {
             .clone()
             .ok_or_else(|| ContribError::Config("permit missing — run authorize first".into()))?;
 
-        let workspace = RunWorkspace::open_existing(&self.config.runs_root, run_id)?;
+        let mut workspace = RunWorkspace::open_existing(&self.config.runs_root, run_id)?;
         if workspace.has_unexpected_changes().await? {
             self.terminal(
                 run_id,
@@ -698,8 +870,13 @@ impl<'a> RunExecutor<'a> {
         for (ecosystem, checks) in adapters::plan_checks(workspace.root()) {
             for check in checks {
                 // Named required checks from the permit override the
-                // adapter's optional flag.
-                let required = check.required || permit.required_checks.contains(&check.name);
+                // adapter's optional flag. Permit names are canonical
+                // (`cargo_test`); adapter names are display form
+                // (`cargo test`) — compare in canonical form.
+                let required = check.required
+                    || permit.required_checks.iter().any(|name| {
+                        *name == crate::core::validation_graph::canonical_check_name(&check.name)
+                    });
                 let mut node = ValidationCheck::new(
                     &check.name,
                     ecosystem.as_str(),
@@ -785,6 +962,79 @@ impl<'a> RunExecutor<'a> {
             graph.push(node);
         }
 
+        // Candidate reproduction leg: when the bug was reproduced at base,
+        // the same commands must now pass. A patch that does not resolve
+        // the reproduced behavior fails closed — required when the base
+        // leg demonstrably reproduced the bug.
+        if let Some(repro) = artifacts.reproduction.clone() {
+            if repro.attempted && !repro.commands.is_empty() {
+                let mut resolved = true;
+                let mut mechanism = String::new();
+                let mut last_digest = None;
+                let mut last_excerpt = String::new();
+                let mut spawn_error = false;
+                for argv in &repro.commands {
+                    mechanism = format!("command: {}", argv.join(" "));
+                    match runner.run_indirect(argv, argv).await {
+                        Ok(outcome) => {
+                            last_digest = Some(outcome.output_digest.clone());
+                            last_excerpt =
+                                format!("{}{}", outcome.stdout_excerpt, outcome.stderr_excerpt);
+                            if outcome.gate != "ran" || outcome.timed_out || !outcome.passed() {
+                                resolved = false;
+                            }
+                        }
+                        Err(_) => {
+                            resolved = false;
+                            spawn_error = true;
+                        }
+                    }
+                }
+                let first_argv = repro.commands.first().cloned().unwrap_or_default();
+                artifacts.reproduction = Some(ReproductionEvidence {
+                    candidate: Some(crate::core::evidence_v3::CandidateReproduction {
+                        resolved,
+                        output_digest: last_digest,
+                        mechanism: mechanism.clone(),
+                    }),
+                    ..repro
+                });
+                let mut node = ValidationCheck::new(
+                    "reproduction",
+                    "runtime",
+                    CheckMechanism::Command { argv: first_argv },
+                    // Required only when the base leg actually reproduced
+                    // the bug — a never-reproduced issue cannot certify a
+                    // fix.
+                    repro.reproduced,
+                );
+                node.finish(
+                    if resolved {
+                        CheckResult::Pass
+                    } else {
+                        CheckResult::Fail
+                    },
+                    if resolved {
+                        format!("{mechanism}: reproduced behavior resolved on candidate")
+                    } else if spawn_error {
+                        format!("{mechanism}: command failed to spawn on candidate")
+                    } else {
+                        format!("{mechanism}: reproduced behavior still present")
+                    },
+                    Some(last_excerpt),
+                    None,
+                );
+                graph.push(node);
+            }
+        }
+
+        // Validation commands legitimately write build/test artifacts into
+        // the workspace (target/, __pycache__, .pytest_cache). Refresh the
+        // checkpoint so the *next* stage's foreign-edit check compares
+        // against post-validation state rather than flagging the checks'
+        // own output.
+        workspace.checkpoint().await?;
+
         artifacts.validation = Some(graph.clone());
         self.save_artifacts(run_id, &artifacts)?;
         Ok(graph)
@@ -840,21 +1090,49 @@ impl<'a> RunExecutor<'a> {
             )?
             .0;
 
-        let workspace = RunWorkspace::open_existing(&self.config.runs_root, run_id)?;
-        let diff_summary = diff_summary(&workspace).await?;
-        let findings = self
-            .env
-            .challenge(&run.repository, &spec, &diff_summary)
-            .await?;
         let candidate_fp = run.candidate_fingerprint.clone().unwrap_or_default();
-        let report = ChallengeReport::completed(
-            findings,
-            &candidate_fp,
-            &self
-                .env
-                .challenger_model_label()
-                .unwrap_or_else(|| "unknown".into()),
-        );
+        let challenger_label = self
+            .env
+            .challenger_model_label()
+            .unwrap_or_else(|| "unknown".into());
+
+        // The challenger reviews the actual unified diff of the exact
+        // candidate — bound preimages vs current workspace content — plus
+        // validation and reproduction evidence, with bounded workspace
+        // access for surrounding context.
+        let workspace = RunWorkspace::open_existing(&self.config.runs_root, run_id)?;
+        if workspace.has_unexpected_changes().await? {
+            return self.terminal(
+                run_id,
+                RunState::Failed,
+                "challenge",
+                "workspace has unexpected changes before challenge",
+            );
+        }
+        let contribution = artifacts
+            .contribution
+            .clone()
+            .ok_or_else(|| ContribError::Config("contribution missing".into()))?;
+        let diff = candidate_diff(&workspace, &contribution);
+        let input = ChallengeInput {
+            diff: &diff,
+            validation: &graph,
+            reproduction: artifacts.reproduction.as_ref(),
+            workspace: workspace.view(),
+        };
+        let findings = match self.env.challenge(&run.repository, &spec, &input).await {
+            Ok(findings) => findings,
+            Err(error) => {
+                // A challenger that cannot run is not a clean review:
+                // record the not-run report and fail closed.
+                artifacts.challenge =
+                    Some(ChallengeReport::not_run(&candidate_fp, &challenger_label));
+                self.save_artifacts(run_id, &artifacts)?;
+                let detail = format!("challenger could not produce findings: {error}");
+                return self.terminal(run_id, RunState::Blocked, "challenge", &detail);
+            }
+        };
+        let report = ChallengeReport::completed(findings, &candidate_fp, &challenger_label);
         run.challenge_summary = Some(report.summary_string());
         run.challenger_model = Some(report.challenger_model.clone());
         let blocking = !report.unresolved_concerns().is_empty();
@@ -905,36 +1183,123 @@ impl<'a> RunExecutor<'a> {
             .task_spec
             .clone()
             .ok_or_else(|| ContribError::Config("task spec missing".into()))?;
+        let permit = artifacts
+            .permit
+            .clone()
+            .ok_or_else(|| ContribError::Config("permit missing".into()))?;
         let findings = artifacts
             .challenge
             .as_ref()
             .map(|c| c.findings.clone())
             .unwrap_or_default();
+        let failing_checks: Vec<ValidationCheck> = artifacts
+            .validation
+            .as_ref()
+            .map(|graph| {
+                graph
+                    .checks
+                    .iter()
+                    .filter(|check| {
+                        check.required
+                            && matches!(check.result, CheckResult::Fail | CheckResult::Skipped)
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
         let workspace = RunWorkspace::open_existing(&self.config.runs_root, run_id)?;
-        let paths = workspace_files(&workspace);
-        let revised = self
-            .env
-            .repair(&run.repository, &spec, &findings, &paths)
-            .await?;
-        for change in &revised {
-            if change.is_deleted {
-                return self.terminal(
-                    run_id,
-                    RunState::Blocked,
-                    "repair",
-                    "repair proposed a file deletion — not supported",
-                );
+
+        // The repair sees the actual current diff, the unresolved
+        // findings, and the real failing checks — not a path list.
+        let prior = artifacts
+            .contribution
+            .clone()
+            .ok_or_else(|| ContribError::Config("contribution missing".into()))?;
+        let diff = candidate_diff(&workspace, &prior);
+        let failing_refs: Vec<&ValidationCheck> = failing_checks.iter().collect();
+        let request = RepairRequest {
+            diff: &diff,
+            findings: &findings,
+            failing_checks: failing_refs,
+            workspace: workspace.view(),
+        };
+        let mut revised = match self.env.repair(&run.repository, &spec, &request).await {
+            Ok(revised) => revised,
+            Err(error) => {
+                let detail = format!("repair failed to produce changes: {error}");
+                self.terminal(run_id, RunState::Failed, "repair", &detail)?;
+                return Err(ContribError::Config(detail));
             }
-            workspace.write_file(&change.path, change.new_content.as_bytes())?;
+        };
+
+        if revised.is_empty() {
+            return self.terminal(
+                run_id,
+                RunState::Blocked,
+                "repair",
+                "repair produced no file changes",
+            );
         }
-        let mut workspace = workspace;
-        workspace.checkpoint().await?;
+
+        // Bind preimages: for files already touched, the base preimage is
+        // the recorded one from the prior change set — the workspace now
+        // holds the candidate, not the base.
+        let prior_preimages: BTreeMap<String, Option<String>> = prior
+            .changes
+            .iter()
+            .chain(prior.tests_added.iter())
+            .map(|change| (change.path.clone(), change.original_content.clone()))
+            .collect();
+        let mut revised_tests = Vec::new();
+        if let Err(reason) = bind_preimages(
+            &workspace,
+            &mut revised,
+            &mut revised_tests,
+            &prior_preimages,
+        ) {
+            return self.terminal(run_id, RunState::Blocked, "repair", &reason);
+        }
 
         // The repaired candidate replaces the staged contribution — the
         // prior human review (if any) is invalidated by the new fingerprint.
         if let Some(contribution) = artifacts.contribution.as_mut() {
             contribution.changes = revised;
             contribution.generated_at = Utc::now();
+        }
+        let repository = self.env.fetch_repository(&run.repository).await?;
+        if let Some(contribution) = artifacts.contribution.as_ref() {
+            let report =
+                AdmissionController::evaluate(&repository, contribution, &permit, Utc::now());
+            if !report.allowed {
+                let reason = report
+                    .violations
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return self.terminal(
+                    run_id,
+                    RunState::Blocked,
+                    "repair",
+                    &format!("repair violates permit: {reason}"),
+                );
+            }
+            for change in &contribution.changes {
+                workspace.write_file(&change.path, change.new_content.as_bytes())?;
+            }
+        }
+        let mut workspace = workspace;
+        workspace.checkpoint().await?;
+
+        // Invalidate every artifact derived from the old candidate —
+        // validation, challenge, review surface, capsule, and review
+        // binding all describe the pre-repair diff.
+        artifacts.validation = None;
+        artifacts.challenge = None;
+        artifacts.review_surface = None;
+        artifacts.capsule = None;
+        if let Some(repro) = artifacts.reproduction.as_mut() {
+            repro.candidate = None;
         }
         run.repair_iterations += 1;
         run.candidate_fingerprint = artifacts
@@ -1007,16 +1372,41 @@ impl<'a> RunExecutor<'a> {
                 .map(|_| unreachable!());
         }
 
-        // Deterministic review-cost surface from the workspace diff.
+        // Deterministic review-cost surface from the candidate itself:
+        // recorded base preimages vs the current workspace contents. This
+        // is exact — build artifacts produced by validation commands never
+        // leak into the review surface.
         let workspace = RunWorkspace::open_existing(&self.config.runs_root, run_id)?;
-        let changed = workspace.changed_files().await.unwrap_or_else(|_| {
-            contribution
-                .changes
-                .iter()
-                .chain(contribution.tests_added.iter())
-                .map(ChangedFile::from_file_change)
-                .collect()
-        });
+        if workspace.has_unexpected_changes().await? {
+            return self
+                .terminal(
+                    run_id,
+                    RunState::Failed,
+                    "evidence",
+                    "workspace has unexpected changes before evidence packaging",
+                )
+                .map(|_| unreachable!());
+        }
+        let changed: Vec<ChangedFile> = contribution
+            .changes
+            .iter()
+            .chain(contribution.tests_added.iter())
+            .map(|change| {
+                let before = change.original_content.clone().unwrap_or_default();
+                let after = workspace
+                    .read_file(&change.path)
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                    .unwrap_or_else(|_| change.new_content.clone());
+                let (added, deleted) =
+                    crate::core::review_surface::line_diff_counts(&before, &after);
+                ChangedFile {
+                    path: change.path.clone(),
+                    lines_added: added,
+                    lines_deleted: deleted,
+                    is_binary: after.as_bytes().contains(&0),
+                }
+            })
+            .collect();
         let unresolved = artifacts
             .challenge
             .as_ref()
@@ -1032,7 +1422,7 @@ impl<'a> RunExecutor<'a> {
         );
         artifacts.review_surface = Some(surface.clone());
 
-        let capsule = EvidenceCapsuleV3::build(
+        let mut capsule = EvidenceCapsuleV3::build(
             &run,
             &contribution,
             &permit,
@@ -1043,6 +1433,7 @@ impl<'a> RunExecutor<'a> {
             artifacts.reproduction.clone(),
             Some(&surface),
         );
+        capsule.materialization = artifacts.materialization.clone();
         artifacts.capsule = Some(capsule.clone());
         self.save_artifacts(run_id, &artifacts)?;
         Ok(capsule)
@@ -1253,50 +1644,310 @@ fn label_consent(issue: &RunIssueView) -> Option<RepositoryConsent> {
     Some(RepositoryConsent::from_label(issue.number, label))
 }
 
-/// Repo-relative file paths present in the workspace, for solver context.
-fn workspace_files(workspace: &RunWorkspace) -> Vec<String> {
-    let mut paths = Vec::new();
-    collect_paths(workspace.root(), workspace.root(), &mut paths, 0);
-    paths
+/// Unified diff of the exact candidate: recorded base preimages vs the
+/// current workspace contents (read back, not the solver's claim).
+/// Deterministic and bounded — truncation is marked, never silent.
+fn candidate_diff(workspace: &RunWorkspace, contribution: &Contribution) -> DiffBundle {
+    let mut triples: Vec<(String, String, String)> = Vec::new();
+    for change in contribution
+        .changes
+        .iter()
+        .chain(contribution.tests_added.iter())
+    {
+        let before = change.original_content.clone().unwrap_or_default();
+        // Read back the workspace content — the diff describes what is
+        // actually on disk, so foreign edits cannot hide inside a
+        // solver-reported postimage.
+        let after = workspace
+            .read_file(&change.path)
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_else(|_| change.new_content.clone());
+        triples.push((change.path.clone(), before, after));
+    }
+    unified_diff::render(&triples)
 }
 
-fn collect_paths(root: &Path, dir: &Path, out: &mut Vec<String>, depth: usize) {
-    if depth > 6 || out.len() > 500 {
-        return;
+/// Verify and bind change preimages to on-disk truth.
+///
+/// - Rejects deletions and policy-invalid paths outright.
+/// - A solver-supplied `original_content` must equal the base bytes —
+///   claiming a different base means the model hallucinated its context.
+/// - Missing `original_content` is filled from the workspace (or the
+///   recorded base preimage for files already changed by a prior
+///   candidate, where the workspace holds post-image content).
+/// - `is_new_file` is normalized to the bound truth.
+fn bind_preimages(
+    workspace: &RunWorkspace,
+    changes: &mut [FileChange],
+    tests_added: &mut [FileChange],
+    prior_preimages: &BTreeMap<String, Option<String>>,
+) -> std::result::Result<(), String> {
+    for change in changes.iter_mut().chain(tests_added.iter_mut()) {
+        if change.is_deleted {
+            return Err(format!(
+                "candidate deletes {} — file deletions are not supported",
+                change.path
+            ));
+        }
+        if let Some(reason) = repository_path_error(&change.path) {
+            return Err(format!("unsafe path {:?}: {reason}", change.path));
+        }
+        // Base bytes: prior preimage when this path was already changed,
+        // else the current workspace content (the workspace is at base
+        // for solve, or base+candidate for repair).
+        let current = workspace
+            .resolve(&change.path)
+            .ok()
+            .filter(|p| p.is_file())
+            .and_then(|_| workspace.read_file(&change.path).ok());
+        let base: Option<Vec<u8>> = match prior_preimages.get(&change.path) {
+            Some(preimage) => preimage.as_ref().map(|text| text.as_bytes().to_vec()),
+            None => current.clone(),
+        };
+        if let Some(claimed) = &change.original_content {
+            let claimed_bytes = claimed.as_bytes();
+            // During repair a model naturally quotes the current file
+            // (base + prior candidate). Accept either the recorded base
+            // preimage or the on-disk content — anything else means the
+            // model is working from stale or fabricated context.
+            let matches_base = base.as_deref().map(|b| b == claimed_bytes).unwrap_or(false);
+            let matches_current = prior_preimages.contains_key(&change.path)
+                && current
+                    .as_deref()
+                    .map(|c| c == claimed_bytes)
+                    .unwrap_or(false);
+            if !matches_base && !matches_current {
+                return Err(format!(
+                    "claimed preimage for {} does not match the workspace — \
+                     solver is working from stale or fabricated context",
+                    change.path
+                ));
+            }
+        }
+        change.is_new_file = base.is_none();
+        change.original_content = base.map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
     }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_paths(root, &path, out, depth + 1);
-        } else if let Ok(rel) = path.strip_prefix(root) {
-            out.push(rel.to_string_lossy().replace('\\', "/"));
+    Ok(())
+}
+
+// ── Strict model-output parsing ─────────────────────────────────────────
+//
+// Solver, repair, and challenger output is untrusted model text. Parsing
+// fails closed: malformed JSON, missing required fields, or unparseable
+// items are errors — never "empty output" that downstream stages could
+// mistake for a clean result.
+
+/// Extract the single JSON document from model output.
+///
+/// Accepts a bare JSON value, a fenced ```json block, or prose with one
+/// embedded document (first `{`/`[` through the last `}`/`]`). Whatever is
+/// extracted must parse completely — a document that is truncated or
+/// malformed is an error, not a partial result.
+fn extract_json_document(response: &str) -> Result<serde_json::Value> {
+    let trimmed = response.trim();
+    let mut candidates: Vec<&str> = vec![
+        trimmed,
+        trimmed
+            .trim_start_matches("```json")
+            .trim_start_matches("```")
+            .trim_end_matches("```")
+            .trim(),
+    ];
+    let start = trimmed.find(['{', '[']).unwrap_or(usize::MAX);
+    let end = trimmed.rfind(['}', ']']);
+    if let (Some(end), true) = (end, start != usize::MAX) {
+        if end > start {
+            candidates.push(&trimmed[start..=end]);
         }
     }
+    for candidate in candidates {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(candidate) {
+            return Ok(value);
+        }
+    }
+    Err(ContribError::Config(
+        "model output is not a parseable JSON document".into(),
+    ))
 }
 
-/// Compact diff description for the challenger — paths and sizes only,
-/// never full contents.
-async fn diff_summary(workspace: &RunWorkspace) -> Result<String> {
-    let changed = workspace.changed_files().await?;
-    let mut lines = Vec::new();
-    for file in &changed {
-        lines.push(format!(
-            "{} (+{}/-{}{})",
-            file.path,
-            file.lines_added,
-            file.lines_deleted,
-            if file.is_binary { ", binary" } else { "" }
+/// Parse one `{path, new_content}` change object strictly.
+fn parse_file_change(item: &serde_json::Value, context: &str) -> Result<FileChange> {
+    let object = item
+        .as_object()
+        .ok_or_else(|| ContribError::Config(format!("{context}: change item is not an object")))?;
+    let path = object
+        .get("path")
+        .and_then(|v| v.as_str())
+        .filter(|p| !p.trim().is_empty())
+        .ok_or_else(|| {
+            ContribError::Config(format!("{context}: change is missing a non-empty `path`"))
+        })?;
+    let new_content = object
+        .get("new_content")
+        .and_then(|v| v.as_str())
+        .or_else(|| object.get("content").and_then(|v| v.as_str()))
+        .ok_or_else(|| {
+            ContribError::Config(format!(
+                "{context}: change for {path} is missing `new_content`"
+            ))
+        })?;
+    if new_content.is_empty() {
+        return Err(ContribError::Config(format!(
+            "{context}: change for {path} has empty content — deletions are not supported"
+        )));
+    }
+    Ok(FileChange {
+        path: path.to_string(),
+        original_content: object
+            .get("original_content")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        new_content: new_content.to_string(),
+        is_new_file: object
+            .get("is_new_file")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        is_deleted: object
+            .get("is_deleted")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    })
+}
+
+/// Parse the `changes`/`tests_added` arrays from a solver/repair document.
+fn parse_change_arrays(
+    data: &serde_json::Value,
+    context: &str,
+) -> Result<(Vec<FileChange>, Vec<FileChange>)> {
+    let object = data
+        .as_object()
+        .ok_or_else(|| ContribError::Config(format!("{context}: output is not a JSON object")))?;
+    let mut changes = Vec::new();
+    let mut tests = Vec::new();
+    for (key, sink) in [("changes", &mut changes), ("tests_added", &mut tests)] {
+        if let Some(value) = object.get(key) {
+            let items = value.as_array().ok_or_else(|| {
+                ContribError::Config(format!("{context}: `{key}` is not an array"))
+            })?;
+            for item in items {
+                sink.push(parse_file_change(item, context)?);
+            }
+        }
+    }
+    Ok((changes, tests))
+}
+
+/// Strictly parse solver output into a [`SolverCandidate`].
+///
+/// Requires a JSON object with a non-empty `changes` array where every
+/// entry has a non-empty `path` and `new_content`. Anything else is an
+/// error — a run must not proceed on output it cannot fully account for.
+pub fn parse_solver_output(response: &str, spec: &TaskSpec) -> Result<SolverCandidate> {
+    let data = extract_json_document(response)?;
+    let (changes, tests_added) = parse_change_arrays(&data, "solver output")?;
+    if changes.is_empty() && tests_added.is_empty() {
+        return Err(ContribError::Config(
+            "solver output contains no file changes".into(),
         ));
     }
-    Ok(lines.join("\n"))
+    let title = data["title"].as_str().unwrap_or(&spec.title).to_string();
+    let description = data["description"].as_str().unwrap_or("").to_string();
+    let commit_message = data["commit_message"]
+        .as_str()
+        .unwrap_or(&title)
+        .to_string();
+    let first_path = changes
+        .first()
+        .or(tests_added.first())
+        .map(|c| c.path.clone())
+        .unwrap_or_default();
+    Ok(SolverCandidate {
+        title,
+        description,
+        commit_message,
+        contribution_type: ContributionType::CodeQuality,
+        finding: Finding {
+            id: String::new(),
+            finding_type: ContributionType::CodeQuality,
+            severity: crate::core::models::Severity::Medium,
+            title: spec.title.clone(),
+            description: spec
+                .requirements
+                .first()
+                .map(|r| r.text.clone())
+                .unwrap_or_default(),
+            file_path: first_path,
+            line_start: None,
+            line_end: None,
+            suggestion: None,
+            confidence: 0.8,
+            priority_signals: vec![],
+        },
+        changes,
+        tests_added,
+    })
+}
+
+/// Strictly parse repair output — a JSON object with `changes` and
+/// optionally `tests_added`, non-empty in total.
+pub fn parse_repair_output(response: &str) -> Result<Vec<FileChange>> {
+    let data = extract_json_document(response)?;
+    let (changes, tests) = parse_change_arrays(&data, "repair output")?;
+    let mut all = changes;
+    all.extend(tests);
+    if all.is_empty() {
+        return Err(ContribError::Config(
+            "repair output contains no file changes".into(),
+        ));
+    }
+    Ok(all)
+}
+
+/// Strictly parse challenger output into findings.
+///
+/// Accepts `{"findings": [...]}` or a bare array. Malformed JSON, a
+/// non-array `findings`, or an item without a summary string is an
+/// error — an unparseable challenger response must never masquerade as
+/// "no findings".
+pub fn parse_findings_output(response: &str) -> Result<Vec<ChallengeFinding>> {
+    let data = extract_json_document(response)?;
+    let items: &Vec<serde_json::Value> = match data.get("findings") {
+        Some(value) => value.as_array().ok_or_else(|| {
+            ContribError::Config("challenger output: `findings` is not an array".into())
+        })?,
+        None => data.as_array().ok_or_else(|| {
+            ContribError::Config(
+                "challenger output is neither an object with `findings` nor an array".into(),
+            )
+        })?,
+    };
+    let mut findings = Vec::new();
+    for item in items.iter().take(50) {
+        let summary = item["summary"].as_str().unwrap_or("").trim().to_string();
+        if summary.is_empty() {
+            return Err(ContribError::Config(
+                "challenger finding is missing a non-empty `summary`".into(),
+            ));
+        }
+        findings.push(ChallengeFinding {
+            severity: crate::core::challenge::ChallengeSeverity::parse(
+                item["severity"].as_str().unwrap_or("info"),
+            ),
+            category: crate::core::challenge::ChallengeCategory::parse(
+                item["category"].as_str().unwrap_or("other"),
+            ),
+            summary: crate::core::safe_truncate(&summary, 500).to_string(),
+            file_path: item["file_path"].as_str().map(str::to_string),
+            resolved: false,
+        });
+    }
+    Ok(findings)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::materialization::{SkipReason, SkippedFile};
     use crate::core::models::Severity;
     use crate::orchestrator::memory::Memory;
     use crate::orchestrator::review_gate::{ReviewAction, ReviewDecision};
@@ -1327,16 +1978,48 @@ mod tests {
         }
     }
 
-    const MANIFEST: &str = "schema_version: 2\nenabled: true\nallowed_paths:\n  - src/**\nmax_files: 5\nmax_changed_lines: 200\nrequired_checks:\n  - cargo test\n";
+    /// Manifest consent: write scope `src/**`, modest budgets.
+    const MANIFEST: &str = "schema_version: 2\nenabled: true\nallowed_paths:\n  - src/**\nmax_files: 5\nmax_changed_lines: 200\n";
+    /// Variant with a required check no adapter covers for a bare snapshot.
+    /// `cargo_test` is the canonical check name (`cargo test` canonicalizes
+    /// to it at manifest parse).
+    const MANIFEST_STRICT: &str = "schema_version: 2\nenabled: true\nallowed_paths:\n  - src/**\nmax_files: 5\nmax_changed_lines: 200\nrequired_checks:\n  - cargo_test\n";
+    /// Variant with unrestricted path scope (protected paths still deny).
+    const MANIFEST_ALL: &str = "schema_version: 2\nenabled: true\nallowed_paths:\n  - \"**\"\nmax_files: 5\nmax_changed_lines: 500\n";
 
-    /// Deterministic fake environment: manifest consent, trivial snapshot,
-    /// scripted solver/challenger, auto-approving human.
+    fn default_snapshot() -> Vec<(String, Vec<u8>)> {
+        vec![("src/lib.rs".into(), b"pub fn a() {}\n".to_vec())]
+    }
+
+    /// Deterministic fake environment: manifest consent, scripted
+    /// solver/challenger, auto-approving human. The solver/repair/challenge
+    /// implementations exercise the real `WorkspaceView` so tests prove
+    /// context reaches the model boundary.
     struct FakeEnv {
         approve: bool,
         submit_called: StdMutex<bool>,
-        challenge_findings: Vec<ChallengeFinding>,
         manifest: Option<&'static str>,
+        label: Option<&'static str>,
+        attested_sha: Option<String>,
+        snapshot_files: Vec<(String, Vec<u8>)>,
+        skipped: Vec<SkippedFile>,
+        truncated: bool,
         reproduce_argv: Vec<Vec<String>>,
+        solve_changes: Option<Vec<FileChange>>,
+        solve_error: bool,
+        repair_changes: Option<Vec<FileChange>>,
+        repair_error: bool,
+        challenge_findings: Vec<ChallengeFinding>,
+        /// When set, the challenger returns findings on the first call and
+        /// an empty list afterwards — the one-repair-then-clean path.
+        challenge_once: bool,
+        challenge_error: bool,
+        challenge_calls: StdMutex<u32>,
+        // Spies proving real context crossed the model boundary.
+        solve_saw_paths: StdMutex<Vec<String>>,
+        solve_read_lib: StdMutex<Option<String>>,
+        challenge_saw_diff: StdMutex<String>,
+        repair_saw_checks: StdMutex<Vec<String>>,
     }
 
     impl FakeEnv {
@@ -1344,9 +2027,25 @@ mod tests {
             Self {
                 approve: true,
                 submit_called: StdMutex::new(false),
-                challenge_findings: vec![],
                 manifest: Some(MANIFEST),
+                label: None,
+                attested_sha: None,
+                snapshot_files: default_snapshot(),
+                skipped: vec![],
+                truncated: false,
                 reproduce_argv: vec![],
+                solve_changes: None,
+                solve_error: false,
+                repair_changes: None,
+                repair_error: false,
+                challenge_findings: vec![],
+                challenge_once: false,
+                challenge_error: false,
+                challenge_calls: StdMutex::new(0),
+                solve_saw_paths: StdMutex::new(vec![]),
+                solve_read_lib: StdMutex::new(None),
+                challenge_saw_diff: StdMutex::new(String::new()),
+                repair_saw_checks: StdMutex::new(vec![]),
             }
         }
     }
@@ -1366,7 +2065,7 @@ mod tests {
                 title: "fix the thing".into(),
                 body: "the thing is broken".into(),
                 state: "open".into(),
-                labels: vec![],
+                labels: self.label.iter().map(|l| l.to_string()).collect(),
                 maintainer_comments: vec![],
             })
         }
@@ -1376,15 +2075,15 @@ mod tests {
         }
 
         async fn attest_base_sha(&self, _repo: &str, _issue: Option<i64>) -> Result<String> {
-            Ok(SHA.to_string())
+            Ok(self.attested_sha.clone().unwrap_or_else(|| SHA.to_string()))
         }
 
-        async fn fetch_base_snapshot(
-            &self,
-            _repo: &str,
-            _base_sha: &str,
-        ) -> Result<Vec<(String, Vec<u8>)>> {
-            Ok(vec![("src/lib.rs".into(), b"pub fn a() {}\n".to_vec())])
+        async fn fetch_base_snapshot(&self, _repo: &str, _base_sha: &str) -> Result<BaseSnapshot> {
+            Ok(BaseSnapshot {
+                files: self.snapshot_files.clone(),
+                skipped: self.skipped.clone(),
+                truncated: self.truncated,
+            })
         }
 
         async fn task_inputs(&self, _repo: &str, _issue: Option<i64>) -> Result<OwnedTaskInputs> {
@@ -1400,6 +2099,7 @@ mod tests {
             &self,
             _repo: &str,
             _spec: &TaskSpec,
+            _workspace: &WorkspaceView<'_>,
         ) -> Result<Vec<Vec<String>>> {
             Ok(self.reproduce_argv.clone())
         }
@@ -1408,8 +2108,26 @@ mod tests {
             &self,
             _repo: &str,
             _spec: &TaskSpec,
-            _paths: &[String],
+            workspace: &WorkspaceView<'_>,
         ) -> Result<SolverCandidate> {
+            *self.solve_saw_paths.lock().unwrap() = workspace.list_paths();
+            let before = workspace
+                .read_text("src/lib.rs", crate::exec::workspace::VIEW_READ_LIMIT)
+                .map(|t| t.content);
+            *self.solve_read_lib.lock().unwrap() = before.clone();
+            if self.solve_error {
+                return Err(ContribError::Config("solver transport failed".into()));
+            }
+            let changes = self.solve_changes.clone().unwrap_or_else(|| {
+                let before = before.unwrap_or_default();
+                vec![FileChange {
+                    path: "src/lib.rs".into(),
+                    original_content: Some(before.clone()),
+                    new_content: format!("{before}pub fn b() {{}}\n"),
+                    is_new_file: false,
+                    is_deleted: false,
+                }]
+            });
             Ok(SolverCandidate {
                 title: "fix: the thing".into(),
                 description: "fixes it".into(),
@@ -1428,13 +2146,7 @@ mod tests {
                     confidence: 0.9,
                     priority_signals: vec![],
                 },
-                changes: vec![FileChange {
-                    path: "src/lib.rs".into(),
-                    original_content: Some("pub fn a() {}\n".into()),
-                    new_content: "pub fn a() {}\npub fn b() {}\n".into(),
-                    is_new_file: false,
-                    is_deleted: false,
-                }],
+                changes,
                 tests_added: vec![],
             })
         }
@@ -1443,13 +2155,30 @@ mod tests {
             &self,
             _repo: &str,
             _spec: &TaskSpec,
-            _findings: &[ChallengeFinding],
-            _paths: &[String],
+            request: &RepairRequest<'_>,
         ) -> Result<Vec<FileChange>> {
+            *self.repair_saw_checks.lock().unwrap() = request
+                .failing_checks
+                .iter()
+                .map(|c| c.name.clone())
+                .collect();
+            if self.repair_error {
+                return Err(ContribError::Config("repair transport failed".into()));
+            }
+            if let Some(changes) = &self.repair_changes {
+                return Ok(changes.clone());
+            }
+            // Quote the CURRENT file as the claimed preimage — the repair
+            // contract accepts base or current content.
+            let current = request
+                .workspace
+                .read_text("src/lib.rs", crate::exec::workspace::VIEW_READ_LIMIT)
+                .map(|t| t.content)
+                .unwrap_or_else(|| "pub fn a() {}\n".into());
             Ok(vec![FileChange {
                 path: "src/lib.rs".into(),
-                original_content: None,
-                new_content: "pub fn a() {}\npub fn b() {}\npub fn c() {}\n".into(),
+                original_content: Some(current.clone()),
+                new_content: format!("{current}pub fn c() {{}}\n"),
                 is_new_file: false,
                 is_deleted: false,
             }])
@@ -1459,8 +2188,16 @@ mod tests {
             &self,
             _repo: &str,
             _spec: &TaskSpec,
-            _diff: &str,
+            input: &ChallengeInput<'_>,
         ) -> Result<Vec<ChallengeFinding>> {
+            *self.challenge_saw_diff.lock().unwrap() = input.diff.text.clone();
+            *self.challenge_calls.lock().unwrap() += 1;
+            if self.challenge_error {
+                return Err(ContribError::Config("challenger transport failed".into()));
+            }
+            if self.challenge_once && *self.challenge_calls.lock().unwrap() > 1 {
+                return Ok(vec![]);
+            }
             Ok(self.challenge_findings.clone())
         }
 
@@ -1484,16 +2221,25 @@ mod tests {
 
         async fn submit(
             &self,
-            _contribution: &Contribution,
+            contribution: &Contribution,
             repo: &Repository,
-            _evidence: &EvidenceCapsuleV3,
-            _run: &ContributionRun,
-            _permit: &ContributionPermit,
+            evidence: &EvidenceCapsuleV3,
+            run: &ContributionRun,
+            permit: &ContributionPermit,
         ) -> Result<PrResult> {
+            // Mirror the production write path: the capsule is re-validated
+            // against the exact candidate before any "external" write.
+            if let Err(violations) =
+                evidence.validate_for_submission(contribution, repo, run, permit, Utc::now())
+            {
+                return Err(ContribError::Config(format!(
+                    "evidence validation failed: {violations:?}"
+                )));
+            }
             *self.submit_called.lock().unwrap() = true;
             Ok(PrResult {
                 repo: repo.clone(),
-                contribution: _contribution.clone(),
+                contribution: contribution.clone(),
                 pr_number: 42,
                 pr_url: "https://github.com/octo/repo/pull/42".into(),
                 status: crate::core::models::PrStatus::Open,
@@ -1557,86 +2303,16 @@ mod tests {
     #[tokio::test]
     async fn label_consent_authorizes_when_manifest_absent() {
         let (dir, memory) = setup();
-        let mut env = FakeEnv {
+        let env = FakeEnv {
             manifest: None,
+            label: Some("contribai-approved"),
             ..FakeEnv::new()
         };
-        // Issue carries a maintainer approval label.
         let run = new_run(&memory);
-        // Patch fetch_issue to return a labeled issue — use a wrapper env.
-        struct LabeledEnv(FakeEnv);
-        #[async_trait]
-        impl RunEnvironment for LabeledEnv {
-            async fn fetch_consent_manifest(&self, r: &str, p: &str) -> Result<Option<String>> {
-                self.0.fetch_consent_manifest(r, p).await
-            }
-            async fn fetch_issue(&self, r: &str, i: i64) -> Result<RunIssueView> {
-                let mut v = self.0.fetch_issue(r, i).await?;
-                v.labels = vec!["contribai-approved".into()];
-                Ok(v)
-            }
-            async fn fetch_repository(&self, r: &str) -> Result<Repository> {
-                self.0.fetch_repository(r).await
-            }
-            async fn attest_base_sha(&self, r: &str, i: Option<i64>) -> Result<String> {
-                self.0.attest_base_sha(r, i).await
-            }
-            async fn fetch_base_snapshot(
-                &self,
-                r: &str,
-                s: &str,
-            ) -> Result<Vec<(String, Vec<u8>)>> {
-                self.0.fetch_base_snapshot(r, s).await
-            }
-            async fn task_inputs(&self, r: &str, i: Option<i64>) -> Result<OwnedTaskInputs> {
-                self.0.task_inputs(r, i).await
-            }
-            async fn solve(&self, r: &str, s: &TaskSpec, p: &[String]) -> Result<SolverCandidate> {
-                self.0.solve(r, s, p).await
-            }
-            async fn repair(
-                &self,
-                r: &str,
-                s: &TaskSpec,
-                f: &[ChallengeFinding],
-                p: &[String],
-            ) -> Result<Vec<FileChange>> {
-                self.0.repair(r, s, f, p).await
-            }
-            async fn challenge(
-                &self,
-                r: &str,
-                s: &TaskSpec,
-                d: &str,
-            ) -> Result<Vec<ChallengeFinding>> {
-                self.0.challenge(r, s, d).await
-            }
-            async fn human_review(
-                &self,
-                c: &Contribution,
-                n: &str,
-                e: &EvidenceCapsuleV3,
-            ) -> Result<RunReviewDecision> {
-                self.0.human_review(c, n, e).await
-            }
-            async fn submit(
-                &self,
-                c: &Contribution,
-                r: &Repository,
-                e: &EvidenceCapsuleV3,
-                run: &ContributionRun,
-                p: &ContributionPermit,
-            ) -> Result<PrResult> {
-                self.0.submit(c, r, e, run, p).await
-            }
-        }
-        let labeled = LabeledEnv(env);
-        let exec = executor(&memory, &labeled, dir.path(), false);
+        let exec = executor(&memory, &env, dir.path(), false);
         let run = exec.authorize(&run.run_id).await.unwrap();
         assert_eq!(run.state, RunState::Authorized);
         assert!(run.permit_id.is_some());
-        env = labeled.0;
-        let _ = env;
     }
 
     #[tokio::test]
@@ -1726,74 +2402,433 @@ mod tests {
     #[tokio::test]
     async fn attested_sha_mismatch_blocks() {
         let (dir, memory) = setup();
-        struct BadSha(FakeEnv);
-        #[async_trait]
-        impl RunEnvironment for BadSha {
-            async fn fetch_consent_manifest(&self, r: &str, p: &str) -> Result<Option<String>> {
-                self.0.fetch_consent_manifest(r, p).await
-            }
-            async fn fetch_issue(&self, r: &str, i: i64) -> Result<RunIssueView> {
-                self.0.fetch_issue(r, i).await
-            }
-            async fn fetch_repository(&self, r: &str) -> Result<Repository> {
-                self.0.fetch_repository(r).await
-            }
-            async fn attest_base_sha(&self, _r: &str, _i: Option<i64>) -> Result<String> {
-                Ok("f".repeat(40))
-            }
-            async fn fetch_base_snapshot(
-                &self,
-                r: &str,
-                s: &str,
-            ) -> Result<Vec<(String, Vec<u8>)>> {
-                self.0.fetch_base_snapshot(r, s).await
-            }
-            async fn task_inputs(&self, r: &str, i: Option<i64>) -> Result<OwnedTaskInputs> {
-                self.0.task_inputs(r, i).await
-            }
-            async fn solve(&self, r: &str, s: &TaskSpec, p: &[String]) -> Result<SolverCandidate> {
-                self.0.solve(r, s, p).await
-            }
-            async fn repair(
-                &self,
-                r: &str,
-                s: &TaskSpec,
-                f: &[ChallengeFinding],
-                p: &[String],
-            ) -> Result<Vec<FileChange>> {
-                self.0.repair(r, s, f, p).await
-            }
-            async fn challenge(
-                &self,
-                r: &str,
-                s: &TaskSpec,
-                d: &str,
-            ) -> Result<Vec<ChallengeFinding>> {
-                self.0.challenge(r, s, d).await
-            }
-            async fn human_review(
-                &self,
-                c: &Contribution,
-                n: &str,
-                e: &EvidenceCapsuleV3,
-            ) -> Result<RunReviewDecision> {
-                self.0.human_review(c, n, e).await
-            }
-            async fn submit(
-                &self,
-                c: &Contribution,
-                r: &Repository,
-                e: &EvidenceCapsuleV3,
-                run: &ContributionRun,
-                p: &ContributionPermit,
-            ) -> Result<PrResult> {
-                self.0.submit(c, r, e, run, p).await
-            }
-        }
-        let env = BadSha(FakeEnv::new());
+        let env = FakeEnv {
+            attested_sha: Some("f".repeat(40)),
+            ..FakeEnv::new()
+        };
         let run = new_run(&memory);
         let exec = executor(&memory, &env, dir.path(), false);
         let run = exec.authorize(&run.run_id).await.unwrap();
         assert_eq!(run.state, RunState::Blocked);
+    }
+
+    // ── Context reaches the model boundary ────────────────────────────
+
+    #[tokio::test]
+    async fn solver_sees_real_workspace_context() {
+        let (dir, memory) = setup();
+        let env = FakeEnv::new();
+        let run = new_run(&memory);
+        let exec = executor(&memory, &env, dir.path(), false);
+        let run = exec.drive(&run.run_id).await.unwrap();
+        assert_eq!(run.state, RunState::Approved);
+        // The solver read the real file contents through the bounded view.
+        assert_eq!(
+            env.solve_read_lib.lock().unwrap().as_deref(),
+            Some("pub fn a() {}\n")
+        );
+        assert!(env
+            .solve_saw_paths
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| p == "src/lib.rs"));
+    }
+
+    #[tokio::test]
+    async fn challenger_sees_actual_unified_diff() {
+        let (dir, memory) = setup();
+        let env = FakeEnv::new();
+        let run = new_run(&memory);
+        let exec = executor(&memory, &env, dir.path(), false);
+        let run = exec.drive(&run.run_id).await.unwrap();
+        assert_eq!(run.state, RunState::Approved);
+        let diff = env.challenge_saw_diff.lock().unwrap().clone();
+        assert!(diff.contains("--- a/src/lib.rs"), "diff:\n{diff}");
+        assert!(diff.contains("+++ b/src/lib.rs"), "diff:\n{diff}");
+        assert!(diff.contains("+pub fn b() {}"), "diff:\n{diff}");
+    }
+
+    // ── Materialization completeness ──────────────────────────────────
+
+    #[tokio::test]
+    async fn in_scope_skipped_file_blocks_prepare() {
+        let (dir, memory) = setup();
+        let env = FakeEnv {
+            skipped: vec![SkippedFile {
+                path: "src/big.rs".into(),
+                reason: SkipReason::Oversized,
+                size: 200_000,
+            }],
+            ..FakeEnv::new()
+        };
+        let run = new_run(&memory);
+        let exec = executor(&memory, &env, dir.path(), false);
+        // `prepare` transitions to Blocked and reports the gap as an error.
+        assert!(exec.drive(&run.run_id).await.is_err());
+        let run = memory.get_run(&run.run_id).unwrap().unwrap();
+        assert_eq!(run.state, RunState::Blocked);
+        let artifacts = RunArtifacts::load(dir.path(), &run.run_id).unwrap();
+        let report = artifacts.materialization.unwrap();
+        assert!(!report.is_complete());
+        assert!(report.gaps.iter().any(|g| g.contains("src/big.rs")));
+    }
+
+    #[tokio::test]
+    async fn truncated_snapshot_blocks_prepare() {
+        let (dir, memory) = setup();
+        let env = FakeEnv {
+            truncated: true,
+            ..FakeEnv::new()
+        };
+        let run = new_run(&memory);
+        let exec = executor(&memory, &env, dir.path(), false);
+        assert!(exec.drive(&run.run_id).await.is_err());
+        let run = memory.get_run(&run.run_id).unwrap().unwrap();
+        assert_eq!(run.state, RunState::Blocked);
+    }
+
+    // ── Candidate binding ─────────────────────────────────────────────
+
+    fn change(path: &str, original: Option<&str>, new: &str) -> FileChange {
+        FileChange {
+            path: path.into(),
+            original_content: original.map(str::to_string),
+            new_content: new.into(),
+            is_new_file: false,
+            is_deleted: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn solver_claimed_preimage_mismatch_blocks() {
+        let (dir, memory) = setup();
+        let env = FakeEnv {
+            solve_changes: Some(vec![change(
+                "src/lib.rs",
+                Some("hallucinated base content\n"),
+                "pub fn z() {}\n",
+            )]),
+            ..FakeEnv::new()
+        };
+        let run = new_run(&memory);
+        let exec = executor(&memory, &env, dir.path(), false);
+        let run = exec.drive(&run.run_id).await.unwrap();
+        assert_eq!(run.state, RunState::Blocked);
+    }
+
+    #[tokio::test]
+    async fn solver_out_of_scope_path_blocks() {
+        let (dir, memory) = setup();
+        let env = FakeEnv {
+            solve_changes: Some(vec![change("docs/readme.md", None, "x\n")]),
+            ..FakeEnv::new()
+        };
+        let run = new_run(&memory);
+        let exec = executor(&memory, &env, dir.path(), false);
+        let run = exec.drive(&run.run_id).await.unwrap();
+        assert_eq!(run.state, RunState::Blocked);
+    }
+
+    #[tokio::test]
+    async fn solver_protected_path_blocks_even_when_scope_allows() {
+        let (dir, memory) = setup();
+        let env = FakeEnv {
+            manifest: Some(MANIFEST_ALL),
+            solve_changes: Some(vec![change(".github/workflows/ci.yml", None, "x\n")]),
+            ..FakeEnv::new()
+        };
+        let run = new_run(&memory);
+        let exec = executor(&memory, &env, dir.path(), false);
+        let run = exec.drive(&run.run_id).await.unwrap();
+        assert_eq!(run.state, RunState::Blocked);
+    }
+
+    #[tokio::test]
+    async fn solver_unsafe_path_blocks() {
+        let (dir, memory) = setup();
+        let env = FakeEnv {
+            solve_changes: Some(vec![change("../escape.rs", None, "x\n")]),
+            ..FakeEnv::new()
+        };
+        let run = new_run(&memory);
+        let exec = executor(&memory, &env, dir.path(), false);
+        let run = exec.drive(&run.run_id).await.unwrap();
+        assert_eq!(run.state, RunState::Blocked);
+    }
+
+    #[tokio::test]
+    async fn solver_deletion_is_rejected() {
+        let (dir, memory) = setup();
+        let mut deleted = change("src/lib.rs", Some("pub fn a() {}\n"), "");
+        deleted.is_deleted = true;
+        let env = FakeEnv {
+            solve_changes: Some(vec![deleted]),
+            ..FakeEnv::new()
+        };
+        let run = new_run(&memory);
+        let exec = executor(&memory, &env, dir.path(), false);
+        let run = exec.drive(&run.run_id).await.unwrap();
+        assert_eq!(run.state, RunState::Blocked);
+    }
+
+    #[tokio::test]
+    async fn oversized_candidate_blocks() {
+        let (dir, memory) = setup();
+        let big = std::iter::once("pub fn a() {}\n".to_string())
+            .chain((0..300).map(|i| format!("pub fn f{i}() {{}}\n")))
+            .collect::<String>();
+        let env = FakeEnv {
+            solve_changes: Some(vec![change("src/lib.rs", Some("pub fn a() {}\n"), &big)]),
+            ..FakeEnv::new()
+        };
+        let run = new_run(&memory);
+        let exec = executor(&memory, &env, dir.path(), false);
+        let run = exec.drive(&run.run_id).await.unwrap();
+        assert_eq!(run.state, RunState::Blocked);
+    }
+
+    // ── Fail-closed model failures ────────────────────────────────────
+
+    #[tokio::test]
+    async fn solver_transport_failure_fails_run() {
+        let (dir, memory) = setup();
+        let env = FakeEnv {
+            solve_error: true,
+            ..FakeEnv::new()
+        };
+        let run = new_run(&memory);
+        let exec = executor(&memory, &env, dir.path(), false);
+        let err = exec.drive(&run.run_id).await.unwrap_err();
+        assert!(err.to_string().contains("solver"));
+        let run = memory.get_run(&run.run_id).unwrap().unwrap();
+        assert_eq!(run.state, RunState::Failed);
+    }
+
+    #[tokio::test]
+    async fn challenger_failure_blocks_with_recorded_report() {
+        let (dir, memory) = setup();
+        let env = FakeEnv {
+            challenge_error: true,
+            ..FakeEnv::new()
+        };
+        let run = new_run(&memory);
+        let exec = executor(&memory, &env, dir.path(), false);
+        let run = exec.drive(&run.run_id).await.unwrap();
+        assert_eq!(run.state, RunState::Blocked);
+        let artifacts = RunArtifacts::load(dir.path(), &run.run_id).unwrap();
+        let report = artifacts.challenge.expect("not-run report recorded");
+        assert!(report.findings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn missing_required_check_blocks_and_repair_sees_it() {
+        let (dir, memory) = setup();
+        let env = FakeEnv {
+            manifest: Some(MANIFEST_STRICT),
+            ..FakeEnv::new()
+        };
+        let run = new_run(&memory);
+        let exec = executor(&memory, &env, dir.path(), false);
+        let run = exec.drive(&run.run_id).await.unwrap();
+        // cargo test cannot run in a bare snapshot → required check skipped
+        // → incomplete → bounded repair → exhausted → blocked.
+        assert_eq!(run.state, RunState::Blocked);
+        let checks = env.repair_saw_checks.lock().unwrap().clone();
+        assert!(checks.iter().any(|c| c == "cargo_test"), "{checks:?}");
+    }
+
+    #[tokio::test]
+    async fn repair_then_clean_challenge_approves_and_rebinds() {
+        let (dir, memory) = setup();
+        let env = FakeEnv {
+            challenge_once: true,
+            challenge_findings: vec![ChallengeFinding {
+                severity: crate::core::challenge::ChallengeSeverity::High,
+                category: crate::core::challenge::ChallengeCategory::MissingEdgeCase,
+                summary: "edge case".into(),
+                file_path: None,
+                resolved: false,
+            }],
+            ..FakeEnv::new()
+        };
+        let run = new_run(&memory);
+        let exec = executor(&memory, &env, dir.path(), false);
+        let run = exec.drive(&run.run_id).await.unwrap();
+        assert_eq!(run.state, RunState::Approved);
+        assert_eq!(run.repair_iterations, 1);
+        // Review fingerprint binds to the POST-repair candidate.
+        let artifacts = RunArtifacts::load(dir.path(), &run.run_id).unwrap();
+        let capsule = artifacts.capsule.unwrap();
+        assert_eq!(capsule.review_fingerprint, run.review_fingerprint);
+        assert!(capsule
+            .materialization
+            .as_ref()
+            .map(|m| m.is_complete())
+            .unwrap_or(false));
+    }
+
+    // ── Consent / boundary retests ────────────────────────────────────
+
+    #[tokio::test]
+    async fn expired_run_fails_closed() {
+        let (dir, memory) = setup();
+        let env = FakeEnv::new();
+        let run =
+            ContributionRun::new("octo/repo", Some(7), SHA, Utc::now() - Duration::seconds(5));
+        memory.insert_run(&run).unwrap();
+        let exec = executor(&memory, &env, dir.path(), false);
+        assert!(exec.drive(&run.run_id).await.is_err());
+        let run = memory.get_run(&run.run_id).unwrap().unwrap();
+        assert_eq!(run.state, RunState::Expired);
+    }
+
+    #[tokio::test]
+    async fn candidate_change_after_approval_fails_submission() {
+        let (dir, memory) = setup();
+        let env = FakeEnv::new();
+        let run = new_run(&memory);
+        let exec = executor(&memory, &env, dir.path(), true);
+        // Drive to evidence (no review), then approve explicitly.
+        let run = exec.drive_to_evidence(&run.run_id).await.unwrap();
+        assert_eq!(run.state, RunState::ReadyForReview);
+        let run = exec.review(&run.run_id).await.unwrap();
+        assert_eq!(run.state, RunState::Approved);
+        // Tamper: the candidate changes after the human approved it.
+        let mut artifacts = RunArtifacts::load(dir.path(), &run.run_id).unwrap();
+        artifacts
+            .contribution
+            .as_mut()
+            .unwrap()
+            .changes
+            .push(change("src/extra.rs", None, "sneaky\n"));
+        artifacts.save(dir.path(), &run.run_id).unwrap();
+        let err = exec.submit(&run.run_id).await.unwrap_err();
+        assert!(err.to_string().contains("evidence validation"));
+        assert!(!*env.submit_called.lock().unwrap());
+        let run = memory.get_run(&run.run_id).unwrap().unwrap();
+        assert_eq!(run.state, RunState::Approved); // not submitted
+    }
+
+    // ── Two-leg reproduction with a real command ──────────────────────
+
+    fn python_available() -> bool {
+        std::process::Command::new("python")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    #[tokio::test]
+    async fn two_leg_reproduction_with_real_command() {
+        if !python_available() {
+            eprintln!("skipping: python not on PATH");
+            return;
+        }
+        let (dir, memory) = setup();
+        let env = FakeEnv {
+            snapshot_files: vec![
+                ("src/lib.rs".into(), b"pub fn a() {}\n".to_vec()),
+                (
+                    "check_fix.py".into(),
+                    b"import os, sys\nsys.exit(0 if os.path.exists('src/fixed.txt') else 1)\n"
+                        .to_vec(),
+                ),
+            ],
+            reproduce_argv: vec![vec!["python".into(), "check_fix.py".into()]],
+            solve_changes: Some(vec![change("src/fixed.txt", None, "fixed\n")]),
+            ..FakeEnv::new()
+        };
+        let run = new_run(&memory);
+        let exec = executor(&memory, &env, dir.path(), false);
+        let run = exec.drive(&run.run_id).await.unwrap();
+        assert_eq!(run.state, RunState::Approved);
+        let artifacts = RunArtifacts::load(dir.path(), &run.run_id).unwrap();
+        let repro = artifacts.reproduction.unwrap();
+        assert!(repro.attempted && repro.reproduced);
+        let candidate = repro.candidate.expect("candidate leg recorded");
+        assert!(candidate.resolved);
+        assert_eq!(
+            repro.commands,
+            vec![vec!["python".to_string(), "check_fix.py".to_string()]]
+        );
+    }
+
+    #[tokio::test]
+    async fn unresolved_candidate_reproduction_blocks() {
+        if !python_available() {
+            eprintln!("skipping: python not on PATH");
+            return;
+        }
+        let (dir, memory) = setup();
+        let env = FakeEnv {
+            snapshot_files: vec![
+                ("src/lib.rs".into(), b"pub fn a() {}\n".to_vec()),
+                (
+                    "check_fix.py".into(),
+                    b"import os, sys\nsys.exit(0 if os.path.exists('src/fixed.txt') else 1)\n"
+                        .to_vec(),
+                ),
+            ],
+            reproduce_argv: vec![vec!["python".into(), "check_fix.py".into()]],
+            // The solver changes lib.rs but never creates the marker —
+            // the reproduced behavior persists on the candidate.
+            ..FakeEnv::new()
+        };
+        let run = new_run(&memory);
+        let exec = executor(&memory, &env, dir.path(), false);
+        let run = exec.drive(&run.run_id).await.unwrap();
+        assert_eq!(run.state, RunState::Blocked);
+    }
+
+    // ── Strict model-output parsing (unit) ────────────────────────────
+
+    #[test]
+    fn solver_output_parsing_fails_closed() {
+        let spec = TaskSpec::draft("o/r", Some(1), "t");
+        assert!(parse_solver_output("not json", &spec).is_err());
+        assert!(parse_solver_output("{\"changes\": [", &spec).is_err());
+        assert!(parse_solver_output("{\"changes\": []}", &spec).is_err());
+        assert!(parse_solver_output("{\"title\": \"x\"}", &spec).is_err());
+        assert!(parse_solver_output("{\"changes\": [{\"path\": \"a.rs\"}]}", &spec).is_err());
+        assert!(parse_solver_output(
+            "{\"changes\": [{\"path\": \"a.rs\", \"new_content\": \"\"}]}",
+            &spec
+        )
+        .is_err());
+        // Prose-wrapped JSON parses; the extracted document is complete.
+        let ok = parse_solver_output(
+            "Here is the patch:\n{\"changes\": [{\"path\": \"a.rs\", \"new_content\": \"x\"}]}\nDone.",
+            &spec,
+        );
+        assert!(ok.is_ok());
+        // Fenced JSON parses too.
+        let fenced = parse_solver_output(
+            "```json\n{\"changes\": [{\"path\": \"a.rs\", \"new_content\": \"x\"}]}\n```",
+            &spec,
+        );
+        assert!(fenced.is_ok());
+    }
+
+    #[test]
+    fn findings_output_parsing_fails_closed() {
+        assert!(parse_findings_output("not json").is_err());
+        assert!(parse_findings_output("{\"findings\": \"oops\"}").is_err());
+        assert!(parse_findings_output("{\"findings\": [{}]}").is_err());
+        assert!(parse_findings_output("{\"findings\": []}")
+            .unwrap()
+            .is_empty());
+        let ok = parse_findings_output(
+            "{\"findings\": [{\"severity\": \"high\", \"category\": \"security\", \"summary\": \"bad\"}]}",
+        )
+        .unwrap();
+        assert_eq!(ok.len(), 1);
+        assert_eq!(
+            ok[0].severity,
+            crate::core::challenge::ChallengeSeverity::High
+        );
     }
 }
