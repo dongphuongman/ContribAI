@@ -67,7 +67,7 @@ allowed_issue_labels: []
 | Field | Default | Meaning |
 |---|---:|---|
 | `denied_paths` | `[]` | Maintainer deny-globs evaluated after protected paths |
-| `required_checks` | `[]` | Named validation checks that must run and pass before admission |
+| `required_checks` | `[]` | Named validation checks that must run and pass before admission. Check names are canonicalized (`cargo test` ≡ `cargo_test`); unsafe names fail closed at manifest parse |
 | `allow_dependency_changes` | `false` | Whether dependency manifests and lockfiles may change |
 | `allow_new_files` | `true` | Whether new files may be added |
 | `allow_test_changes` | `true` | Whether test files may change |

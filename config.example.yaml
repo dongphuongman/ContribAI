@@ -3,6 +3,7 @@
 
 github:
   token: ""                    # GITHUB_TOKEN or `gh auth token`
+  api_base: null               # GHES override, e.g. https://ghe.example.com/api/v3
   rate_limit_buffer: 100
   max_prs_per_day: 2
 

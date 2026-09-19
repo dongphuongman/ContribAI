@@ -1,0 +1,6 @@
+schema_version: 2
+enabled: true
+allowed_paths:
+  - "**"
+max_files: 5
+max_changed_lines: 200

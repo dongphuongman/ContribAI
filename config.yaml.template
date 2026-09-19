@@ -6,6 +6,7 @@ locale: en
 github:
   token: ""
   token_encrypted: null
+  api_base: null               # GHES API base override; default api.github.com
   rate_limit_buffer: 100
   max_prs_per_day: 2
 
