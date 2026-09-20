@@ -328,6 +328,10 @@ pub struct GitHubConfig {
     pub rate_limit_buffer: u32,
     #[serde(default = "default_max_prs_per_day")]
     pub max_prs_per_day: u32,
+    /// GitHub API base URL override (e.g. GitHub Enterprise Server
+    /// `https://ghe.example.com/api/v3`). Empty/None = api.github.com.
+    #[serde(default)]
+    pub api_base: Option<String>,
 }
 
 impl std::fmt::Debug for GitHubConfig {
@@ -361,6 +365,7 @@ impl Default for GitHubConfig {
             token_encrypted: None,
             rate_limit_buffer: default_rate_limit_buffer(),
             max_prs_per_day: default_max_prs_per_day(),
+            api_base: None,
         }
     }
 }

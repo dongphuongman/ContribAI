@@ -15,6 +15,7 @@
 //! - cleanup never deletes a dirty tree unless told to preserve state.
 
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 
@@ -403,6 +404,14 @@ impl RunWorkspace {
         Ok(())
     }
 
+    /// A bounded, read-only view used to build model context.
+    ///
+    /// The view reuses the workspace's path safety checks so model-facing
+    /// readers cannot escape the run directory or follow symlinks out of it.
+    pub fn view(&self) -> WorkspaceView<'_> {
+        WorkspaceView { workspace: self }
+    }
+
     /// Changed files vs the base: `git diff --numstat` for git workspaces,
     /// the recorded change list for snapshots.
     pub async fn changed_files(&self) -> Result<Vec<ChangedFile>> {
@@ -639,6 +648,111 @@ impl RunWorkspace {
         std::fs::write(&self.meta_path, raw)
             .map_err(|e| ContribError::Config(format!("workspace meta write: {e}")))?;
         Ok(())
+    }
+}
+
+/// Default cap on per-file reads served to model context.
+pub const VIEW_READ_LIMIT: usize = 64 * 1024;
+/// Cap on the number of entries [`WorkspaceView::list_paths`] returns.
+pub const VIEW_LIST_LIMIT: usize = 20_000;
+
+/// Bounded read-only access to a materialized run workspace.
+///
+/// This is the interface solver/repair/challenger context builders use so
+/// they read real files instead of guessing — every read is path-checked,
+/// size-bounded, and reports truncation honestly.
+pub struct WorkspaceView<'a> {
+    workspace: &'a RunWorkspace,
+}
+
+impl WorkspaceView<'_> {
+    /// Repo-relative paths of all materialized files (sorted, bounded).
+    /// `.git` internals and workspace metadata sidecars are excluded.
+    pub fn list_paths(&self) -> Vec<String> {
+        let mut paths = Vec::new();
+        collect_paths(self.workspace.root(), self.workspace.root(), &mut paths);
+        paths.sort();
+        paths.truncate(VIEW_LIST_LIMIT);
+        paths
+    }
+
+    /// True when `path` resolves to a regular materialized file.
+    pub fn exists(&self, path: &str) -> bool {
+        self.workspace
+            .resolve(path)
+            .map(|p| p.is_file())
+            .unwrap_or(false)
+    }
+
+    /// Read up to `max_bytes` of a file. `None` when the path is rejected
+    /// by policy or does not exist.
+    pub fn read_bytes(&self, path: &str, max_bytes: usize) -> Option<Vec<u8>> {
+        let resolved = self.workspace.resolve(path).ok()?;
+        if !resolved.is_file() {
+            return None;
+        }
+        let file = std::fs::File::open(&resolved).ok()?;
+        let mut buf = Vec::new();
+        std::io::Read::take(file, max_bytes as u64)
+            .read_to_end(&mut buf)
+            .ok()?;
+        Some(buf)
+    }
+
+    /// UTF-8 text read with truncation reporting.
+    pub fn read_text(&self, path: &str, max_bytes: usize) -> Option<ReadText> {
+        let resolved = self.workspace.resolve(path).ok()?;
+        let meta = std::fs::metadata(&resolved).ok()?;
+        if !meta.is_file() {
+            return None;
+        }
+        let bytes = self.read_bytes(path, max_bytes)?;
+        let truncated = meta.len() > bytes.len() as u64;
+        Some(ReadText {
+            path: path.to_string(),
+            content: String::from_utf8_lossy(&bytes).into_owned(),
+            size_bytes: meta.len(),
+            truncated,
+        })
+    }
+}
+
+/// Result of a bounded text read through [`WorkspaceView`].
+pub struct ReadText {
+    pub path: String,
+    pub content: String,
+    pub size_bytes: u64,
+    /// True when `content` was cut at the read limit.
+    pub truncated: bool,
+}
+
+fn collect_paths(root: &Path, dir: &Path, out: &mut Vec<String>) {
+    if out.len() >= VIEW_LIST_LIMIT {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if out.len() >= VIEW_LIST_LIMIT {
+            return;
+        }
+        let path = entry.path();
+        let Ok(rel) = path.strip_prefix(root) else {
+            continue;
+        };
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        if rel_str == ".git" || rel_str.starts_with(".git/") {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if meta.is_dir() {
+            collect_paths(root, &path, out);
+        } else if meta.is_file() && !rel_str.ends_with(".workspace.json") {
+            out.push(rel_str);
+        }
     }
 }
 

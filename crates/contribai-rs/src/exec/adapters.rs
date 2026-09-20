@@ -58,9 +58,10 @@ pub struct AdapterCheck {
 }
 
 /// Manifest filenames mapped to ecosystems, in detection precedence order.
-/// Lockfiles decide between JS package managers.
-fn detect_ecosystem(root: &Path) -> Vec<Ecosystem> {
-    let has = |name: &str| root.join(name).is_file();
+/// Lockfiles decide between JS package managers. `has` answers whether a
+/// top-level manifest name is present — a directory probe on disk for
+/// [`detect`], or a path-set membership test for [`detect_paths`].
+fn detect_ecosystem_with(has: impl Fn(&str) -> bool) -> Vec<Ecosystem> {
     let mut found = Vec::new();
 
     if has("Cargo.toml") {
@@ -99,7 +100,13 @@ fn detect_ecosystem(root: &Path) -> Vec<Ecosystem> {
 /// Detect the workspace ecosystems. Monorepos can legitimately contain more
 /// than one (e.g., Cargo + npm); checks are emitted per ecosystem.
 pub fn detect(root: &Path) -> Vec<Ecosystem> {
-    detect_ecosystem(root)
+    detect_ecosystem_with(|name| root.join(name).is_file())
+}
+
+/// Detect ecosystems from a repo-relative path list (e.g. a bounded
+/// workspace listing) instead of touching the filesystem.
+pub fn detect_paths(paths: &[String]) -> Vec<Ecosystem> {
+    detect_ecosystem_with(|name| paths.iter().any(|p| p == name))
 }
 
 /// Standard build/test/lint/fmt check argvs for an ecosystem. Only commands

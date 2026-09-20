@@ -83,6 +83,48 @@ const SECRET_MARKERS: &[&str] = &[
     "ENCRYPT",
 ];
 
+/// Resolve the program part of an argv to a spawnable path.
+///
+/// On Windows, package-manager entrypoints like `npm`, `pnpm`, or `yarn`
+/// are `.cmd`/`.bat` shims that `CreateProcess` cannot run under a bare
+/// name — PATHEXT lookup is a shell feature. Walk the child PATH with the
+/// child PATHEXT so `npm` resolves to the real `npm.cmd`; Rust's `Command`
+/// then routes batch shims through `cmd.exe` with escaped arguments.
+/// Qualified paths and names that already carry an extension are returned
+/// unchanged.
+fn resolve_program(
+    program: &str,
+    #[cfg_attr(not(windows), allow(unused_variables))] env: &HashMap<String, String>,
+) -> std::path::PathBuf {
+    let path = Path::new(program);
+    if program.contains('/') || program.contains('\\') || path.extension().is_some() {
+        return path.to_path_buf();
+    }
+    #[cfg(windows)]
+    {
+        let path_var = env
+            .get("PATH")
+            .cloned()
+            .or_else(|| std::env::var("PATH").ok());
+        let pathext = env
+            .get("PATHEXT")
+            .cloned()
+            .or_else(|| std::env::var("PATHEXT").ok())
+            .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".to_string());
+        if let Some(path_var) = path_var {
+            for dir in std::env::split_paths(&path_var) {
+                for ext in pathext.split(';').filter(|e| !e.is_empty()) {
+                    let candidate = dir.join(format!("{program}{ext}"));
+                    if candidate.is_file() {
+                        return candidate;
+                    }
+                }
+            }
+        }
+    }
+    path.to_path_buf()
+}
+
 /// Whether a variable name looks like a secret.
 fn is_secret_name(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
@@ -245,8 +287,9 @@ impl BoundedRunner {
         }
 
         let env = scrub_environment(&self.env_passthrough);
+        let program = resolve_program(&argv[0], &env);
         let start = Instant::now();
-        let mut child = Command::new(&argv[0])
+        let mut child = Command::new(&program)
             .args(&argv[1..])
             .current_dir(&self.workspace_root)
             .env_clear()

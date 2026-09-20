@@ -41,6 +41,27 @@ pub struct ReproductionEvidence {
     pub mechanism: String,
     /// Digest over the bounded captured output.
     pub output_digest: Option<String>,
+    /// Exact argv vectors executed at the base revision. Recorded so the
+    /// same commands can be re-run on the candidate and reviewers can see
+    /// what "reproduced" actually means.
+    #[serde(default)]
+    pub commands: Vec<Vec<String>>,
+    /// Result of re-running the reproduction commands on the candidate.
+    /// `None` means the candidate leg never ran.
+    #[serde(default)]
+    pub candidate: Option<CandidateReproduction>,
+}
+
+/// Result of re-running reproduction commands against the candidate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CandidateReproduction {
+    /// True when every recorded command exited zero on the candidate —
+    /// i.e. the behavior reproduced at base no longer occurs.
+    pub resolved: bool,
+    /// Digest over the bounded captured output of the last command.
+    pub output_digest: Option<String>,
+    /// Bounded description of the mechanism.
+    pub mechanism: String,
 }
 
 /// Challenger evidence in compact form.
@@ -108,6 +129,11 @@ pub struct EvidenceCapsuleV3 {
     /// Provider/model labels (names only, never keys).
     pub solver_model: Option<String>,
     pub challenger_model: Option<String>,
+    /// Workspace materialization accounting: strategy plus any files that
+    /// could not be materialized. A capsule carrying unresolved gaps fails
+    /// submission validation.
+    #[serde(default)]
+    pub materialization: Option<crate::core::materialization::MaterializationReport>,
     pub policy_version: u8,
     pub validator_version: u8,
     pub generated_at: DateTime<Utc>,
@@ -206,6 +232,7 @@ impl EvidenceCapsuleV3 {
             paths: report.paths.clone(),
             solver_model: run.solver_model.clone(),
             challenger_model: run.challenger_model.clone(),
+            materialization: None,
             policy_version: run.policy_version,
             validator_version: run.validator_version,
             generated_at: Utc::now(),
@@ -292,6 +319,15 @@ impl EvidenceCapsuleV3 {
                     && *run_review == self.contribution_fingerprint
                     && run.review_is_current() => {}
             _ => violations.push(EvidenceViolation::ReviewBindingMismatch),
+        }
+
+        // ── Workspace completeness ────────────────────────────────────
+        // Evidence produced against a workspace with unresolved
+        // materialization gaps cannot certify the candidate.
+        if let Some(report) = &self.materialization {
+            if !report.is_complete() {
+                violations.push(EvidenceViolation::IncompleteWorkspace);
+            }
         }
 
         // ── Consent source validity ─────────────────────────────────────
@@ -868,6 +904,8 @@ mod tests {
                 reproduced: false,
                 mechanism: "command: cargo test".into(),
                 output_digest: None,
+                commands: vec![vec!["cargo".into(), "test".into()]],
+                candidate: None,
             }),
             None,
         );

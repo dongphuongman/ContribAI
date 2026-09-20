@@ -47,8 +47,14 @@ pub fn create_github(config: &ContribAIConfig) -> anyhow::Result<GitHubClient> {
     if config.github.token.is_empty() {
         anyhow::bail!("GitHub token not configured! Set GITHUB_TOKEN env or config.yaml");
     }
-    GitHubClient::new(&config.github.token, config.github.rate_limit_buffer)
-        .map_err(|e| anyhow::anyhow!("{}", e))
+    let client = GitHubClient::new(&config.github.token, config.github.rate_limit_buffer)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    // GHES-style API base override — also the deterministic seam used by
+    // integration tests to point the real client at a local mock.
+    Ok(match &config.github.api_base {
+        Some(base) if !base.trim().is_empty() => client.with_base_url(base),
+        _ => client,
+    })
 }
 
 /// Create an LLM provider from config.

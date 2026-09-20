@@ -190,12 +190,22 @@ impl RepositoryConsent {
         }
         // Denied paths must not include protected paths redundantly, but
         // overlap is harmless — protected paths are checked first anyway.
-        let required_checks = manifest
-            .required_checks
-            .into_iter()
-            .map(|name| name.trim().to_string())
-            .filter(|name| !name.is_empty() && is_safe_check_name(name))
-            .collect::<Vec<_>>();
+        // Required checks are a maintainer-declared admission requirement:
+        // a name that cannot be represented safely must reject the
+        // manifest, not silently drop the requirement. Names are stored in
+        // canonical form (`cargo test` → `cargo_test`) so they match the
+        // validation-graph nodes that ran them.
+        let mut required_checks = Vec::new();
+        for name in manifest.required_checks {
+            let canonical = crate::core::validation_graph::canonical_check_name(&name);
+            if canonical.is_empty() {
+                continue;
+            }
+            if !is_safe_check_name(&canonical) {
+                return None;
+            }
+            required_checks.push(canonical);
+        }
         let allowed_issue_labels = manifest
             .allowed_issue_labels
             .into_iter()
@@ -1104,6 +1114,10 @@ pub enum EvidenceViolation {
     },
     /// Required reproduction evidence is absent or negative (v3).
     ReproductionMissing,
+    /// The workspace the evidence was produced in was provably
+    /// incomplete — skipped in-scope files, manifests, or a truncated
+    /// listing (v3).
+    IncompleteWorkspace,
 }
 
 impl std::fmt::Display for EvidenceViolation {
@@ -1183,6 +1197,9 @@ impl std::fmt::Display for EvidenceViolation {
             }
             Self::ReproductionMissing => {
                 write!(formatter, "required reproduction evidence is missing")
+            }
+            Self::IncompleteWorkspace => {
+                write!(formatter, "workspace materialization had unresolved gaps")
             }
         }
     }
@@ -1636,7 +1653,9 @@ fn is_safe_allow_pattern(pattern: &str) -> bool {
         && Pattern::new(pattern).is_ok()
 }
 
-fn path_matches(pattern: &str, path: &str) -> bool {
+/// Whether `pattern` (an allowed/denied glob) matches `path` under the
+/// admission matching rules (literal separators and leading dots).
+pub fn path_matches(pattern: &str, path: &str) -> bool {
     Pattern::new(pattern)
         .map(|compiled| {
             compiled.matches_with(

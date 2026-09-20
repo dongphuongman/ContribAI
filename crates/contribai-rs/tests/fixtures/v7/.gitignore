@@ -1,0 +1,6 @@
+# Tool byproducts from running the fixtures locally — never part of the
+# fixture repos the e2e tests materialize.
+__pycache__/
+.pytest_cache/
+node_modules/
+target/
